@@ -69,7 +69,6 @@ EXPORT_IGNORE_PATTERNS = [
     "*.sqlite",
     "*.sqlite3",
     "*.lock",
-    "*.js",
     OUTPUT_DIR_NAME + "/",
 ]
 
