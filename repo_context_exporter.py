@@ -55,8 +55,8 @@ EXPORT_IGNORE_PATTERNS = [
     ".git/",
     ".idea/",
     ".vscode/",
-    ".gitignore"
-    ".gitkeep"
+    ".gitignore",
+    ".gitkeep",
     "node_modules/",
     "dist/",
     "build/",
