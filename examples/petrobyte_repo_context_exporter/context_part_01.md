@@ -2,13 +2,6 @@
 
 Generated for LLM prompt context.
 
-## .gitignore
-
-```gitignore
-
-```
----
-
 ## README.md
 
 ```markdown
@@ -92,8 +85,8 @@ Features
 - Writes source code into markdown files with path headers and fenced code blocks.
 - Emits a separate markdown file with the directory tree.
 - Keeps source files whole; never splits one file across multiple output files.
-- Uses a soft line threshold per markdown file.
-- If the repository is too large for MAX_OUTPUT_FILES * TARGET_LINES_PER_OUTPUT,
+- Uses a soft file size threshold per markdown file (in KB).
+- If the repository is too large for MAX_OUTPUT_FILES * MAX_OUTPUT_FILE_SIZE_KB,
   it rebalances content across exactly MAX_OUTPUT_FILES files as evenly as possible.
 
 Typical usage
@@ -106,18 +99,23 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
-import shutil
 
 
 # ============================================================
 # Configuration
 # ============================================================
 
-MAX_OUTPUT_FILES = 9
-TARGET_LINES_PER_OUTPUT = 1200
+# Maximum number of output markdown files.
+MAX_OUTPUT_FILES = 8
+
+# Optional maximum size per output markdown file in KB.
+# Set to -1 to disable the threshold and always distribute evenly.
+MAX_OUTPUT_FILE_SIZE_KB = 200
+
 OUTPUT_DIR_NAME = "llm-context"
 TREE_FILE_NAME = "00_DIRECTORY_TREE.md"
 OUTPUT_FILE_PREFIX = "context_part_"
@@ -125,21 +123,12 @@ READ_FILE_ENCODING = "utf-8"
 READ_FILE_ERRORS = "replace"
 
 # Gitignore-like patterns for files that should NOT be included in code exports.
-# Examples:
-#   "node_modules/"
-#   "dist/"
-#   "*.log"
-#   ".env*"
-#   "coverage/"
-#   "*.min.js"
-#   "/build/"
-#   "**/__pycache__/"
 EXPORT_IGNORE_PATTERNS = [
     ".git/",
     ".idea/",
     ".vscode/",
-    ".gitignore"
-    ".gitkeep"
+    ".gitignore",
+    ".gitkeep",
     "node_modules/",
     "dist/",
     "build/",
@@ -152,8 +141,7 @@ EXPORT_IGNORE_PATTERNS = [
     "*.sqlite",
     "*.sqlite3",
     "*.lock",
-    "*.js",
-    "examples/pallets_click/",
+    "examples/",
     OUTPUT_DIR_NAME + "/",
 ]
 
@@ -166,11 +154,11 @@ TREE_IGNORE_PATTERNS = [
     "coverage/",
     "__pycache__/",
     ".DS_Store",
+    "examples/",
     OUTPUT_DIR_NAME + "/",
 ]
 
 # Files that are usually not helpful as prompt context.
-# Add/remove as needed.
 BINARY_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg",
     ".pdf", ".zip", ".tar", ".gz", ".7z", ".rar",
@@ -257,7 +245,7 @@ SPECIAL_FILENAMES_TO_LANGUAGE = {
 class FileBlock:
     rel_path: str
     markdown: str
-    lines: int
+    bytes: int
 
 
 # ============================================================
@@ -267,19 +255,6 @@ class FileBlock:
 class IgnoreMatcher:
     """
     Small gitignore-like matcher implemented with stdlib only.
-
-    Supported patterns:
-    - *.ext
-    - foo/bar
-    - foo/bar/
-    - **/something
-    - /anchored/from/root
-    - !negation
-
-    Notes
-    - This is intentionally lightweight and close to gitignore behavior,
-      but not a byte-for-byte reimplementation of Git's matcher.
-    - For the common repo cleanup patterns used here, it behaves well.
     """
 
     def __init__(self, patterns: Iterable[str]):
@@ -317,7 +292,6 @@ class IgnoreMatcher:
             return False
 
         if dir_only and not is_dir:
-            # Directory-only pattern still needs to match descendants.
             if path_str == normalized or path_str.startswith(normalized + "/"):
                 return True
 
@@ -389,12 +363,6 @@ def read_text_file(path: Path) -> str:
     return path.read_text(encoding=READ_FILE_ENCODING, errors=READ_FILE_ERRORS)
 
 
-def count_lines(text: str) -> int:
-    if not text:
-        return 0
-    return len(text.splitlines())
-
-
 def make_file_block(root: Path, path: Path) -> FileBlock:
     rel_path = path.relative_to(root).as_posix()
     language = detect_language(path)
@@ -410,7 +378,7 @@ def make_file_block(root: Path, path: Path) -> FileBlock:
     return FileBlock(
         rel_path=rel_path,
         markdown=block,
-        lines=count_lines(block),
+        bytes=len(block.encode("utf-8")),
     )
 
 
@@ -421,7 +389,6 @@ def collect_files(root: Path, ignore_patterns: list[str]) -> list[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         current_dir = Path(dirpath)
 
-        # Prune ignored directories in-place so os.walk does not descend into them.
         kept_dirnames: list[str] = []
         for dirname in sorted(dirnames):
             full_dir = current_dir / dirname
@@ -452,51 +419,66 @@ def collect_files(root: Path, ignore_patterns: list[str]) -> list[Path]:
 # Partitioning
 # ============================================================
 
-def partition_by_soft_threshold(blocks: list[FileBlock], max_files: int, target_lines: int) -> list[list[FileBlock]]:
+def partition_by_soft_threshold(
+    blocks: list[FileBlock],
+    max_files: int,
+    max_kb: int,
+) -> list[list[FileBlock]]:
     if not blocks:
         return []
 
-    total_lines = sum(block.lines for block in blocks)
-    capacity = max_files * target_lines
+    if max_files <= 0:
+        raise ValueError("max_files must be > 0")
 
-    if total_lines <= capacity:
+    max_bytes = None if max_kb < 0 else max_kb * 1024
+
+    # If threshold is disabled, always distribute evenly.
+    if max_bytes is None:
+        return partition_evenly_sequential(blocks, max_files)
+
+    total_bytes = sum(block.bytes for block in blocks)
+    capacity = max_files * max_bytes
+
+    # If total content does not exceed total threshold capacity, do threshold-based packing.
+    if total_bytes <= capacity:
         groups: list[list[FileBlock]] = []
         current_group: list[FileBlock] = []
-        current_lines = 0
+        current_bytes = 0
 
         for block in blocks:
-            would_exceed = current_group and (current_lines + block.lines > target_lines)
+            would_exceed = current_group and (current_bytes + block.bytes > max_bytes)
             still_can_open_new_group = len(groups) < max_files - 1
 
             if would_exceed and still_can_open_new_group:
                 groups.append(current_group)
                 current_group = [block]
-                current_lines = block.lines
+                current_bytes = block.bytes
             else:
                 current_group.append(block)
-                current_lines += block.lines
+                current_bytes += block.bytes
 
         if current_group:
             groups.append(current_group)
 
         return groups
 
-    # Too much content for the soft threshold budget.
-    # Rebalance across exactly max_files files as evenly as possible,
-    # while keeping file blocks whole and preserving order.
+    # Otherwise distribute evenly across exactly max_files outputs.
     return partition_evenly_sequential(blocks, max_files)
 
 
-def partition_evenly_sequential(blocks: list[FileBlock], parts: int) -> list[list[FileBlock]]:
+def partition_evenly_sequential(
+    blocks: list[FileBlock],
+    parts: int,
+) -> list[list[FileBlock]]:
     if parts <= 0:
         raise ValueError("parts must be > 0")
     if not blocks:
         return []
 
-    total_lines = sum(block.lines for block in blocks)
+    total_bytes = sum(block.bytes for block in blocks)
     groups: list[list[FileBlock]] = []
     start = 0
-    consumed_lines = 0
+    consumed_bytes = 0
 
     for part_index in range(parts):
         remaining_parts = parts - part_index
@@ -509,38 +491,36 @@ def partition_evenly_sequential(blocks: list[FileBlock], parts: int) -> list[lis
             groups.append(blocks[start:])
             break
 
-        target_for_this_part = max(1, round((total_lines - consumed_lines) / remaining_parts))
+        target_for_this_part = max(1, round((total_bytes - consumed_bytes) / remaining_parts))
 
         current: list[FileBlock] = []
-        current_lines = 0
+        current_bytes = 0
 
         while start < len(blocks):
             block = blocks[start]
 
             must_leave_one_per_remaining_part = (len(blocks) - (start + 1)) >= (remaining_parts - 1)
+
             if not current:
                 current.append(block)
-                current_lines += block.lines
+                current_bytes += block.bytes
                 start += 1
                 continue
 
-            # Decide whether adding the next block moves us farther away from the target.
-            current_diff = abs(target_for_this_part - current_lines)
-            next_diff = abs(target_for_this_part - (current_lines + block.lines))
+            current_diff = abs(target_for_this_part - current_bytes)
+            next_diff = abs(target_for_this_part - (current_bytes + block.bytes))
 
             if must_leave_one_per_remaining_part and next_diff <= current_diff:
                 current.append(block)
-                current_lines += block.lines
+                current_bytes += block.bytes
                 start += 1
             else:
                 break
 
         groups.append(current)
-        consumed_lines += current_lines
+        consumed_bytes += current_bytes
 
-    # Merge accidental empties if any occurred.
-    groups = [g for g in groups if g]
-    return groups
+    return [g for g in groups if g]
 
 
 # ============================================================
@@ -605,8 +585,8 @@ def print_summary(output_dir: Path, files: list[Path], groups: list[list[FileBlo
     print(f"Included source files: {len(files)}")
     print(f"Context markdown files: {len(groups)}")
     for index, group in enumerate(groups, start=1):
-        line_count = sum(block.lines for block in group)
-        print(f"  - part {index}: {len(group)} files, ~{line_count} lines")
+        size_kb = sum(block.bytes for block in group) / 1024
+        print(f"  - part {index}: {len(group)} files, {size_kb:.1f} KB")
     print(f"Tree file: {TREE_FILE_NAME}")
 
 
@@ -640,7 +620,6 @@ def main() -> int:
 
     output_dir = Path(args.output_dir).resolve() if args.output_dir else root / OUTPUT_DIR_NAME
 
-    # Delete existing export directory to avoid stale files
     if output_dir.exists():
         shutil.rmtree(output_dir)
 
@@ -648,7 +627,13 @@ def main() -> int:
 
     files = collect_files(root, EXPORT_IGNORE_PATTERNS)
     blocks = [make_file_block(root, path) for path in files]
-    groups = partition_by_soft_threshold(blocks, MAX_OUTPUT_FILES, TARGET_LINES_PER_OUTPUT)
+
+    groups = partition_by_soft_threshold(
+        blocks,
+        MAX_OUTPUT_FILES,
+        MAX_OUTPUT_FILE_SIZE_KB,
+    )
+
     tree_lines = build_tree_lines(root, TREE_IGNORE_PATTERNS)
 
     write_tree_file(output_dir, tree_lines)
@@ -659,5 +644,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 ```
