@@ -1,7 +1,7 @@
 # Directory Tree
 
 ```text
-click-main/
+click/
 ├── .devcontainer/
 │   ├── devcontainer.json
 │   └── on-create-command.sh
@@ -14,8 +14,8 @@ click-main/
 │   │   ├── lock.yaml
 │   │   ├── pre-commit.yaml
 │   │   ├── publish.yaml
-│   │   ├── test-flask.yaml
-│   │   └── tests.yaml
+│   │   ├── tests.yaml
+│   │   └── zizmor.yaml
 │   └── pull_request_template.md
 ├── docs/
 │   ├── _static/
@@ -24,15 +24,16 @@ click-main/
 │   │   └── click-name.svg
 │   ├── advanced.md
 │   ├── api.md
-│   ├── arguments.rst
-│   ├── changes.rst
-│   ├── click-concepts.rst
+│   ├── arguments.md
+│   ├── changes.md
+│   ├── click-concepts.md
 │   ├── command-line-reference.md
-│   ├── commands-and-groups.rst
-│   ├── commands.rst
+│   ├── commands-and-groups.md
+│   ├── commands.md
 │   ├── complex.md
 │   ├── conf.py
 │   ├── contrib.md
+│   ├── contributing.md
 │   ├── design-opinions.md
 │   ├── documentation.md
 │   ├── entry-points.md
@@ -40,7 +41,7 @@ click-main/
 │   ├── extending-click.md
 │   ├── faqs.md
 │   ├── handling-files.md
-│   ├── index.rst
+│   ├── index.md
 │   ├── license.md
 │   ├── option-decorators.md
 │   ├── options.md
@@ -50,6 +51,7 @@ click-main/
 │   ├── quickstart.md
 │   ├── setuptools.md
 │   ├── shell-completion.md
+│   ├── standalone-apps.md
 │   ├── support-multiple-versions.md
 │   ├── testing.md
 │   ├── unicode-support.md
@@ -58,58 +60,6 @@ click-main/
 │   ├── virtualenv.md
 │   ├── why.md
 │   └── wincmd.md
-├── examples/
-│   ├── aliases/
-│   │   ├── aliases.ini
-│   │   ├── aliases.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── colors/
-│   │   ├── colors.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── completion/
-│   │   ├── completion.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── complex/
-│   │   ├── complex/
-│   │   │   ├── commands/
-│   │   │   │   ├── __init__.py
-│   │   │   │   ├── cmd_init.py
-│   │   │   │   └── cmd_status.py
-│   │   │   ├── __init__.py
-│   │   │   └── cli.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── imagepipe/
-│   │   ├── .gitignore
-│   │   ├── example01.jpg
-│   │   ├── example02.jpg
-│   │   ├── imagepipe.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── inout/
-│   │   ├── inout.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── naval/
-│   │   ├── naval.py
-│   │   ├── pyproject.toml
-│   │   └── README
-│   ├── repo/
-│   │   ├── pyproject.toml
-│   │   ├── README
-│   │   └── repo.py
-│   ├── termui/
-│   │   ├── pyproject.toml
-│   │   ├── README
-│   │   └── termui.py
-│   ├── validation/
-│   │   ├── pyproject.toml
-│   │   ├── README
-│   │   └── validation.py
-│   └── README
 ├── src/
 │   └── click/
 │       ├── __init__.py
@@ -158,6 +108,7 @@ click-main/
 │   ├── test_options.py
 │   ├── test_parser.py
 │   ├── test_shell_completion.py
+│   ├── test_stream_lifecycle.py
 │   ├── test_termui.py
 │   ├── test_testing.py
 │   ├── test_types.py
@@ -170,5 +121,6 @@ click-main/
 ├── LICENSE.txt
 ├── pyproject.toml
 ├── README.md
+├── repo_context_exporter_1.py
 └── uv.lock
 ```

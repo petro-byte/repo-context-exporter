@@ -1,4 +1,4 @@
-# Repository Context Part 1/6
+# Repository Context Part 1/7
 
 Generated for LLM prompt context.
 
@@ -175,17 +175,19 @@ name: Lock inactive closed issues
 on:
   schedule:
     - cron: '0 0 * * *'
-permissions:
-  issues: write
-  pull-requests: write
-  discussions: write
+permissions: {}
 concurrency:
   group: lock
+  cancel-in-progress: true
 jobs:
   lock:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      discussions: write
     steps:
-      - uses: dessant/lock-threads@1bf7ec25051fe7c00bdd17e6a7cf3d7bfb7dc771 # v5.0.1
+      - uses: dessant/lock-threads@7266a7ce5c1df01b1c6db85bf8cd86c737dadbe7 # v6.0.0
         with:
           issue-inactive-days: 14
           pr-inactive-days: 14
@@ -202,26 +204,30 @@ on:
   pull_request:
   push:
     branches: [main, stable]
+permissions: {}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   main:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
         with:
           enable-cache: true
           prune-cache: false
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         id: setup-python
         with:
           python-version-file: pyproject.toml
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ~/.cache/pre-commit
           key: pre-commit|${{ hashFiles('pyproject.toml', '.pre-commit-config.yaml') }}
-      - run: uv run --locked --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files
-      - uses: pre-commit-ci/lite-action@5d6cc0eb514c891a40562a58a8e71576c5c7fb43 # v1.1.0
-        if: ${{ !cancelled() }}
+      - run: uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files
 
 ```
 ---
@@ -233,79 +239,64 @@ name: Publish
 on:
   push:
     tags: ['*']
+permissions: {}
+concurrency:
+  group: publish-${{ github.event.push.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload-artifact.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          enable-cache: true
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          enable-cache: false
           prune-cache: false
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version-file: pyproject.toml
       - run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
       - run: uv build
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        id: upload-artifact
         with:
-          path: ./dist
+          name: dist
+          path: dist/
+          if-no-files-found: error
   create-release:
     needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist/
       - name: create release
-        run: gh release create --draft --repo ${{ github.repository }} ${{ github.ref_name }} artifact/*
+        run: gh release create --draft --repo ${GITHUB_REPOSITORY} ${GITHUB_REF_NAME} dist/*
         env:
           GH_TOKEN: ${{ github.token }}
   publish-pypi:
     needs: [build]
     environment:
       name: publish
-      url: https://pypi.org/project/click/${{ github.ref_name }}
+      url: https://pypi.org/project/Click/${{ github.ref_name }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist/
       - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
         with:
-          packages-dir: artifact/
-
-```
----
-
-## .github/workflows/test-flask.yaml
-
-```yaml
-name: Test Flask Main
-on:
-  pull_request:
-    paths-ignore: ['docs/**', 'README.md']
-  push:
-    branches: [main, stable]
-    paths-ignore: ['docs/**', 'README.md']
-jobs:
-  flask-tests:
-    name: flask-tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
-        with:
-          enable-cache: true
-          prune-cache: false
-      - run: git clone https://github.com/pallets/flask
-      - run: uv venv --python 3.14
-        working-directory: ./flask
-      - run: source .venv/bin/activate
-        working-directory: ./flask
-      - run: uv sync --all-extras
-        working-directory: ./flask
-      - run: uv run --with "git+https://github.com/pallets/click.git@main" -- pytest
-        working-directory: ./flask
+          packages-dir: "dist/"
 
 ```
 ---
@@ -320,6 +311,10 @@ on:
   push:
     branches: [main, stable]
     paths-ignore: ['docs/**', 'README.md']
+permissions: {}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   tests:
     name: ${{ matrix.name || matrix.python }}
@@ -329,41 +324,76 @@ jobs:
       matrix:
         include:
           - {python: '3.14'}
-          - {name: free-threaded-latest, python: '3.14t'}
+          - {python: '3.14t'}
+          - {name: Windows, python: '3.14', os: windows-latest}
+          - {name: Mac, python: '3.14', os: macos-latest}
           - {python: '3.13'}
-          - {name: Windows, python: '3.13', os: windows-latest}
-          - {name: Mac, python: '3.13', os: macos-latest}
           - {python: '3.12'}
           - {python: '3.11'}
           - {python: '3.10'}
           - {name: PyPy, python: 'pypy-3.11', tox: pypy3.11}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
         with:
           enable-cache: true
           prune-cache: false
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python }}
-      - run: uv run --locked tox run -e ${{ matrix.tox || format('py{0}', matrix.python) }}
+      - run: uv run --locked --no-default-groups --group dev tox run
+        env:
+          TOX_ENV: ${{ matrix.tox || format('py{0}', matrix.python) }}
   typing:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: astral-sh/setup-uv@5a7eac68fb9809dea845d802897dc5c723910fa3 # v7.1.3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
         with:
           enable-cache: true
           prune-cache: false
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version-file: pyproject.toml
       - name: cache mypy
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ./.mypy_cache
           key: mypy|${{ hashFiles('pyproject.toml') }}
-      - run: uv run --locked tox run -e typing
+      - run: uv run --locked --no-default-groups --group dev tox run -e typing
+
+```
+---
+
+## .github/workflows/zizmor.yaml
+
+```yaml
+name: GitHub Actions security analysis with zizmor
+on:
+  pull_request:
+    paths: ["**/*.yaml?"]
+  push:
+    branches: [main, stable]
+    paths: ["**/*.yaml?"]
+permissions: {}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+        with:
+          advanced-security: false
+          annotations: true
 
 ```
 ---
@@ -373,19 +403,25 @@ jobs:
 ```yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 488940d9de1b658fac229e34c521d75a6ea476f2  # frozen: v0.14.5
+    rev: c60c980e561ed3e73101667fe8365c609d19a438  # frozen: v0.15.9
     hooks:
-      - id: ruff
+      - id: ruff-check
       - id: ruff-format
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: b6675a113e27a9b18f3d60c05794d62ca80c7ab5  # frozen: 0.9.9
+    rev: 0397b68f6f88c024f1d2b355a9818779f6336d16  # frozen: 0.11.3
     hooks:
       - id: uv-lock
+  - repo: https://github.com/codespell-project/codespell
+    rev: 2ccb47ff45ad361a21071a7eedda4c37e6ae8c5a  # frozen: v2.4.2
+    hooks:
+      - id: codespell
+        args: ['--write-changes', '--ignore-words-list=inout,te']
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
     hooks:
       - id: check-merge-conflict
       - id: debug-statements
+        exclude: ^(src/click/testing\.py|tests/test_testing\.py)$
       - id: fix-byte-order-marker
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -422,13 +458,180 @@ build:
 ```text
 .. currentmodule:: click
 
+Version 8.5.0
+-------------
+
 Unreleased
 
+
+Version 8.4.1
+-------------
+
+Unreleased
+
+-   Zsh completion scripts parse correctly on Windows. :issue:`3277`
+-   Shell completion of `Choice` `Enum` values produces a valid completion
+    result. :issue:`3015`
+
+Version 8.4.0
+-------------
+
+Released 2026-05-17
+
+-   :class:`ParamType` typing improvements. :pr:`3371`
+
+    -   :class:`ParamType` is now a generic abstract base class,
+        parameterized by its converted value type.
+    -   :meth:`~ParamType.convert` return types are narrowed on all
+        concrete types (``str`` for :class:`STRING`, ``int`` for
+        :class:`INT`, etc.).
+    -   :meth:`~ParamType.to_info_dict` returns specific
+        :class:`~typing.TypedDict` subclasses instead of
+        ``dict[str, Any]``.
+    -   :class:`CompositeParamType` and the number-range base are now
+        generic with abstract methods.
+-   Refactor ``convert_type`` to extract type inference into a private
+    ``_guess_type`` helper, and add :func:`typing.overload` signatures.
+    :pr:`3372`
+-   :class:`Parameter` typing improvements. :pr:`2805`
+
+    -   :class:`Parameter` is now an abstract base class, making explicit
+        that it cannot be instantiated directly.
+    -   :attr:`Parameter.name` is now ``str`` instead of ``str | None``.
+        When ``expose_value=False``, the name is set to ``""`` instead
+        of ``None``.
+    -   The ``ctx`` parameter of :meth:`Parameter.get_error_hint` is now
+        typed as ``Context | None``, matching the runtime behavior.
+-   Split string values from ``default_map`` for parameters with ``nargs > 1``
+    or :class:`Tuple` type, matching environment variable behavior.
+    :issue:`2745` :pr:`3364`
+-   Auto-detect ``type=UNPROCESSED`` for ``flag_value`` of non-basic types
+    (not ``str``, ``int``, ``float``, or ``bool``), so programmer-provided
+    Python objects like classes and enum members are passed through unchanged
+    instead of being stringified. Previously ``type=click.UNPROCESSED`` had
+    to be set explicitly. :issue:`2012` :pr:`3363`
+-   The error hint now uses :meth:`Command.get_help_option_names` to pick
+    non-shadowed help option names, so ``Try '... -h'`` no longer points to a
+    subcommand option that shadows ``-h``. All surviving names are shown
+    (``-h/--help``). :issue:`2790` :pr:`3208`
+-   Fix readline functionality on non-Windows platforms. Prompt text is now
+    passed directly to readline instead of being printed separately, allowing
+    proper backspace, line editing, and line wrapping behavior. :issue:`2968`
+    :pr:`2969`
+-   Use :func:`os.startfile` on Windows to open URLs in :func:`open_url`,
+    replacing the ``start`` built-in which cannot be invoked without
+    ``shell=True``. :issue:`3164` :pr:`3186`
+-   Fix Fish shell completion errors when option help text contains newlines.
+    :issue:`3043` :pr:`3126`
+-   Add :class:`NoSuchCommand` exception with suggestions for misspelled
+    commands. :issue:`3107` :pr:`3228`
+-   Use :class:`ValueError` message when conversion in :class:`FuncParamType` would
+    fail. :issue:`3105` :pr:`3211`
+-   Add ``click.get_pager_file`` for file-like access to an output
+    pager. :pr:`1572` :pr:`3405`
+-   :class:`~click.formatting.TextWrapper` and
+    :func:`~click.formatting.wrap_text` now measure line width in visible
+    characters, ignoring ANSI escape sequences. :pr:`3420`
+-   Fix :meth:`HelpFormatter.write_usage` emitting only a blank line when
+    called without ``args``. The usage prefix and program name are now
+    written even when no arguments follow, and the trailing separator
+    space is stripped so the line ends at the program name.
+    :issue:`3360` :pr:`3434`
+-   Show custom error messages from types when :func:`prompt` with
+    ``hide_input=True`` fails validation, instead of always showing a
+    generic message. Built-in type messages mask the input value.
+    :issue:`2809` :pr:`3256`
+-   Add ``capture`` parameter to :class:`CliRunner` with two modes: ``sys``
+    (default) and ``fd``. ``fd`` redirects file descriptors ``1`` and ``2``
+    via :func:`os.dup2` so output that bypasses ``sys.stdout`` (stale stream
+    references, C extensions, subprocesses, ``faulthandler``) is captured
+    with proper isolation. :issue:`854` :issue:`2412` :issue:`2468`
+    :issue:`2497` :issue:`2761` :issue:`2827` :issue:`2865`
+-   Revert the ``8.3.3`` change that exposed the original file descriptor
+    via ``fileno()`` on the redirected ``CliRunner`` streams in the default
+    capture mode. ``os.dup2(w, sys.stdout.fileno())`` calls inside a CLI no
+    longer mutate the host runner's stdout, which broke Pytest's ``fd``-level
+    capture teardown. C-level consumers that need a real ``fd`` should use
+    ``capture="fd"``. :issue:`3384` :pr:`3391`
+-   Mark additional built-in strings with ``gettext()`` to extend translation
+    coverage. :pr:`2902`
+-   Fix feature switch groups (several ``flag_value`` options sharing one
+    parameter name) silently dropping an explicit ``default`` when a sibling
+    option without an explicit default was declared first. Arbitration is now
+    source-aware: a more explicit :class:`ParameterSource` always wins, and
+    within ``ParameterSource.DEFAULT``, an option that received an explicit
+    ``default=`` keyword wins over a sibling whose default was auto-derived.
+    The 8.3.x first-wins fallback for remaining ties was reverted to the
+    pre-8.3.x last-wins fallback. :issue:`3403` :pr:`3404`
+-   Fix missing space between option help text and the ``(DEPRECATED)``
+    label, and localize the option label so it matches the command label.
+    The label and the ``DeprecationWarning`` reason suffix are now produced
+    by shared helpers. :pr:`3423`
+-   Document short option stacking (``-abc`` is parsed as ``-a -b -c``) and
+    clarify that multi-character short option names are not supported.
+    :issue:`2779` :pr:`3431`
+
+Version 8.3.3
+-------------
+
+Released 2026-04-20
+
+-   Use :func:`shlex.split` to split pager and editor commands into ``argv``
+    lists for :class:`subprocess.Popen`, removing ``shell=True``.
+    :issue:`1026` :pr:`1477` :pr:`2775`
+-   Fix ``TypeError`` when rendering help for an option whose default value is
+    an object that doesn't support equality comparison with strings, such as
+    ``semver.Version``. :issue:`3298` :pr:`3299`
+-   Fix pager test pollution under parallel execution by using pytest's
+    ``tmp_path`` fixture instead of a shared temporary file path. :pr:`3238`
+-   Treat ``Sentinel.UNSET`` values in a ``default_map`` as absent, so they fall
+    through to the next default source instead of being used as the value.
+    :issue:`3224` :pr:`3240`
+-   Patch ``pdb.Pdb`` in ``CliRunner`` isolation so ``pdb.set_trace()``,
+    ``breakpoint()``, and debuggers subclassing ``pdb.Pdb`` (ipdb, pdbpp) can
+    interact with the real terminal instead of the captured I/O streams.
+    :issue:`654` :issue:`824` :issue:`843` :pr:`951` :pr:`3235`
+-   Add optional randomized parallel test execution using ``pytest-randomly`` and
+    ``pytest-xdist`` to detect test pollution and race conditions. :pr:`3151`
+-   Add contributor documentation for running stress tests, randomized
+    parallel tests, and Flask smoke tests. :pr:`3151` :pr:`3177`
+-   Show custom ``show_default`` string in prompts, matching the existing
+    help text behavior. :issue:`2836` :pr:`2837` :pr:`3165` :pr:`3262` :pr:`3280`
+    :pr:`3328`
+-   Fix ``default=True`` with boolean ``flag_value`` always returning the
+    ``flag_value`` instead of ``True``. The ``default=True`` to ``flag_value``
+    substitution now only applies to non-boolean flags, where ``True`` acts as a
+    sentinel meaning "activate this flag by default". For boolean flags,
+    ``default=True`` is returned as a literal value. :issue:`3111` :pr:`3239`
+-   Mark ``make_default_short_help`` as private API. :issue:`3189` :pr:`3250`
+-   ``CliRunner``'s redirected streams now expose the original file descriptor
+    via ``fileno()``, so that ``faulthandler``, ``subprocess``, and other
+    C-level consumers no longer crash with ``io.UnsupportedOperation``.
+    :issue:`2865`
+-   Change :class:`ParameterSource` to an :class:`~enum.IntEnum` and reorder
+    its members from most to least explicit, so values can be compared to
+    check whether a parameter was explicitly provided. :issue:`2879` :pr:`3248`
+
+Version 8.3.2
+-------------
+
+Released 2026-04-02
+
 -   Fix handling of ``flag_value`` when ``is_flag=False`` to allow such options to be
-    used without an explicit value. :issue:`3084`
+    used without an explicit value. :issue:`3084` :pr:`3152`
+-   Hide ``Sentinel.UNSET`` values as ``None`` when using ``lookup_default()``.
+    :issue:`3136` :pr:`3199` :pr:`3202` :pr:`3209` :pr:`3212` :pr:`3224`
+-   Prevent ``_NamedTextIOWrapper`` from closing streams owned by ``StreamMixer``.
+    :issue:`824` :issue:`2991` :issue:`2993` :issue:`3110` :pr:`3139` :pr:`3140`
+-   Add comprehensive tests for ``CliRunner`` stream lifecycle, covering
+    logging interaction, multi-threaded safety, and sequential invocation
+    isolation. Add high-iteration stress tests behind a ``stress`` marker
+    with a dedicated CI job. :pr:`3139`
+-   Fix callable ``flag_value`` being instantiated when used as a default via
+    ``default=True``. :issue:`3121` :pr:`3201` :pr:`3213` :pr:`3225`
 
 Version 8.3.1
---------------
+-------------
 
 Released 2025-11-15
 
@@ -1310,7 +1513,7 @@ Released 2018-09-25
     so that changing the working directory does not affect it. :pr:`920`
 -   Fix incorrect completions when defaults are present :issue:`925`,
     :pr:`930`
--   Add copy option attrs so that custom classes can be re-used.
+-   Add copy option attrs so that custom classes can be reused.
     :issue:`926`, :pr:`994`
 -   "x" and "a" file modes now use stdout when file is ``"-"``.
     :pr:`929`
@@ -1776,7 +1979,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## README.md
 
-```markdown
+````markdown
 <div align="center"><img src="https://raw.githubusercontent.com/pallets/click/refs/heads/stable/docs/_static/click-name.svg" alt="" height="150"></div>
 
 # Click
@@ -1840,12 +2043,12 @@ questions, and making PRs.
 
 [contrib]: https://palletsprojects.com/contributing/
 
-```
+````
 ---
 
 ## docs/advanced.md
 
-```markdown
+````markdown
 # Advanced Patterns
 
 ```{currentmodule} click
@@ -2262,12 +2465,12 @@ def cli(ctx, repo_home):
 will be closed when the CLI exits. These were previously not called on exit.
 ```
 
-```
+````
 ---
 
 ## docs/api.md
 
-```markdown
+````markdown
 # API
 
 ```{currentmodule} click
@@ -2340,6 +2543,10 @@ classes and functions.
 
 ```{eval-rst}
 .. autofunction:: echo_via_pager
+```
+
+```{eval-rst}
+.. autofunction:: get_pager_file
 ```
 
 ```{eval-rst}
@@ -2622,37 +2829,40 @@ customizing Click's shell completion system.
    :members:
 ```
 
-```
+````
 ---
 
-## docs/arguments.rst
+## docs/arguments.md
 
-```text
-.. _arguments:
+````markdown
+(arguments)=
 
-Arguments
-=========
+# Arguments
 
-.. currentmodule:: click
+```{currentmodule} click
+```
 
 Arguments are:
 
-*   Are positional in nature.
-*   Similar to a limited version of :ref:`options <options>` that can take an arbitrary number of inputs
-*   :ref:`Documented manually <documenting-arguments>`.
+* Are positional in nature.
+* Similar to a limited version of {ref}`options <options>` that
+  can take an arbitrary number of inputs
+* {ref}`Documented manually <documenting-arguments>`.
 
 Useful and often used kwargs are:
 
-*   ``default``: Passes a default.
-*   ``nargs``: Sets the number of arguments. Set to -1 to take an arbitrary number.
+* `default`: Passes a default.
+* `nargs`: Sets the number of arguments. Set to -1 to take an arbitrary number.
 
-Basic Arguments
----------------
+## Basic Arguments
 
-A minimal :class:`click.Argument` solely takes one string argument: the name of the argument. This will assume the argument is required, has no default, and is of the type ``str``.
+A minimal {class}`click.Argument` solely takes one string argument:
+the name of the argument. This will assume the argument is required,
+has no default, and is of the type `str`.
 
 Example:
 
+```{eval-rst}
 .. click:example::
 
     @click.command()
@@ -2666,19 +2876,31 @@ And from the command line:
 .. click:run::
 
     invoke(touch, args=['foo.txt'])
+```
 
+An argument may be assigned a {ref}`parameter type <parameter-types>`.
+If no type is provided, the type of the default value is used. If no
+default value is provided, the type is assumed to be {data}`STRING`.
 
-An argument may be assigned a :ref:`parameter type <parameter-types>`. If no type is provided, the type of the default value is used. If no default value is provided, the type is assumed to be :data:`STRING`.
+```{admonition} Note on Required Arguments
+:class: note
 
-.. admonition:: Note on Required Arguments
+   It is possible to make an argument required by setting
+   `required=True`. It is not recommended since we think command line
+   tools should gracefully degrade into becoming no ops. We think this
+   because command line tools are often invoked with wildcard inputs
+   and they should not error out if the wildcard is empty.
+```
 
-   It is possible to make an argument required by setting ``required=True``.  It is not recommended since we think command line tools should gracefully degrade into becoming no ops.  We think this because command line tools are often invoked with wildcard inputs and they should not error out if the wildcard is empty.
+## Multiple Arguments
 
-Multiple Arguments
------------------------------------
+To set the number of argument use the `nargs` kwarg. It can be set to
+any positive integer and -1. Setting it to -1, makes the number of
+arguments arbitrary (which is called variadic) and can only be used
+once. The arguments are then packed as a tuple and passed to the
+function.
 
-To set the number of argument use the ``nargs`` kwarg. It can be set to any positive integer and -1. Setting it to -1, makes the number of arguments arbitrary (which is called variadic) and can only be used once. The arguments are then packed as a tuple and passed to the function.
-
+```{eval-rst}
 .. click:example::
 
     @click.command()
@@ -2694,18 +2916,26 @@ And from the command line:
 .. click:run::
 
     invoke(copy, args=['foo.txt', 'usr/david/foo.txt', 'usr/mitsuko/foo.txt'])
+```
 
-.. admonition:: Note on Handling Files
+```{admonition} Note on Handling Files
+:class: note
 
-    This is not how you should handle files and files paths. This merely used as a simple example. See :ref:`handling-files` to learn more about how to handle files in parameters.
+   This is not how you should handle files and files paths. This
+   merely used as a simple example. See {ref}`handling-files` to learn
+   more about how to handle files in parameters.
+```
 
-Argument Escape Sequences
----------------------------
+## Argument Escape Sequences
 
-If you want to process arguments that look like options, like a file named ``-foo.txt`` or ``--foo.txt`` , you must pass the ``--`` separator first. After you pass the ``--``, you may only pass arguments. This is a common feature for POSIX command line tools.
+If you want to process arguments that look like options, like a file
+named `-foo.txt` or `--foo.txt`, you must pass the `--` separator
+first. After you pass the `--`, you may only pass arguments. This is a
+common feature for POSIX command line tools.
 
 Example usage:
 
+```{eval-rst}
 .. click:example::
 
     @click.command()
@@ -2720,9 +2950,12 @@ And from the command line:
 .. click:run::
 
     invoke(touch, ['--', '-foo.txt', 'bar.txt'])
+```
 
-If you don't like the ``--`` marker, you can set ignore_unknown_options to True to avoid checking unknown options:
+If you don't like the `--` marker, you can set
+`ignore_unknown_options` to `True` to avoid checking unknown options:
 
+```{eval-rst}
 .. click:example::
 
     @click.command(context_settings={"ignore_unknown_options": True})
@@ -2737,17 +2970,18 @@ And from the command line:
 .. click:run::
 
     invoke(touch, ['-foo.txt', 'bar.txt'])
+```
 
+(environment-variables)=
 
-.. _environment-variables:
+## Environment Variables
 
-Environment Variables
----------------------
-
-Arguments can use environment variables. To do so, pass the name(s) of the environment variable(s) via `envvar` in ``click.argument``.
+Arguments can use environment variables. To do so, pass the name(s) of
+the environment variable(s) via `envvar` in `click.argument`.
 
 Checking one environment variable:
 
+```{eval-rst}
 .. click:example::
 
     @click.command()
@@ -2786,37 +3020,40 @@ And from the command line:
         with open('hello.txt', 'w') as f:
             f.write('Hello World from second variable!')
         invoke(echo, env={'SRC_2': 'hello.txt'})
-
 ```
+
+````
 ---
 
-## docs/changes.rst
+## docs/changes.md
 
-```text
-Changes
-=======
+````markdown
+# Changes
 
+```{eval-rst}
 .. include:: ../CHANGES.rst
-
 ```
+
+````
 ---
 
-## docs/click-concepts.rst
+## docs/click-concepts.md
 
-```text
-Click Concepts
-================
+````markdown
+# Click Concepts
 
 This section covers concepts about Click's design.
 
-.. contents::
-    :depth: 1
-    :local:
+```{contents}
+---
+depth: 1
+local: true
+---
+```
 
-.. _callback-evaluation-order:
+(callback-evaluation-order)=
 
-Callback Evaluation Order
--------------------------
+## Callback Evaluation Order
 
 Click works a bit differently than some other command line parsers in that
 it attempts to reconcile the order of arguments as defined by the
@@ -2833,51 +3070,51 @@ value as it happens, whereas a callback in Click is invoked after the
 value has been fully converted.
 
 Generally, the order of invocation is driven by the order in which the user
-provides the arguments to the script; if there is an option called ``--foo``
-and an option called ``--bar`` and the user calls it as ``--bar
---foo``, then the callback for ``bar`` will fire before the one for ``foo``.
+provides the arguments to the script; if there is an option called `--foo`
+and an option called `--bar` and the user calls it as `--bar --foo`, then
+the callback for `bar` will fire before the one for `foo`.
 
 There are three exceptions to this rule which are important to know:
 
 Eagerness:
-    An option can be set to be "eager".  All eager parameters are
-    evaluated before all non-eager parameters, but again in the order as
-    they were provided on the command line by the user.
+>    An option can be set to be "eager".  All eager parameters are
+>    evaluated before all non-eager parameters, but again in the order as
+>    they were provided on the command line by the user.
 
-    This is important for parameters that execute and exit like ``--help``
-    and ``--version``.  Both are eager parameters, but whatever parameter
-    comes first on the command line will win and exit the program.
+>    This is important for parameters that execute and exit like `--help`
+>    and `--version`.  Both are eager parameters, but whatever parameter
+>    comes first on the command line will win and exit the program.
 
 Repeated parameters:
-    If an option or argument is split up on the command line into multiple
-    places because it is repeated -- for instance, ``--exclude foo --include
-    baz --exclude bar`` -- the callback will fire based on the position of
-    the first option.  In this case, the callback will fire for
-    ``exclude`` and it will be passed both options (``foo`` and
-    ``bar``), then the callback for ``include`` will fire with ``baz``
-    only.
+>    If an option or argument is split up on the command line into multiple
+>    places because it is repeated -- for instance, `--exclude foo --include
+>    baz --exclude bar` -- the callback will fire based on the position of
+>    the first option.  In this case, the callback will fire for
+>    `exclude` and it will be passed both options (`foo` and
+>    `bar`), then the callback for `include` will fire with `baz`
+>    only.
 
-    Note that even if a parameter does not allow multiple versions, Click
-    will still accept the position of the first, but it will ignore every
-    value except the last.  The reason for this is to allow composability
-    through shell aliases that set defaults.
+>    Note that even if a parameter does not allow multiple versions, Click
+>    will still accept the position of the first, but it will ignore every
+>    value except the last.  The reason for this is to allow composability
+>    through shell aliases that set defaults.
 
 Missing parameters:
-    If a parameter is not defined on the command line, the callback will
-    still fire.  This is different from how it works in optparse where
-    undefined values do not fire the callback.  Missing parameters fire
-    their callbacks at the very end which makes it possible for them to
-    default to values from a parameter that came before.
+>    If a parameter is not defined on the command line, the callback will
+>    still fire.  This is different from how it works in optparse where
+>    undefined values do not fire the callback.  Missing parameters fire
+>    their callbacks at the very end which makes it possible for them to
+>    default to values from a parameter that came before.
 
 Most of the time you do not need to be concerned about any of this,
 but it is important to know how it works for some advanced cases.
 
-```
+````
 ---
 
 ## docs/command-line-reference.md
 
-```markdown
+````markdown
 # General Command Line Topics
 
 ```{currentmodule} click
@@ -2929,31 +3166,38 @@ To access the exit code, execute the command, then do the following depending:
 
 For Click specific behavior on exit codes, see {ref}`exception-handling-exit-codes`.
 
-```
+````
 ---
 
-## docs/commands-and-groups.rst
+## docs/commands-and-groups.md
 
-```text
-Basic Commands, Groups, Context
-================================
+````markdown
+# Basic Commands, Groups, Context
 
-.. currentmodule:: click
+```{currentmodule} click
+```
 
-Commands and Groups are the building blocks for Click applications. :class:`Command` wraps a function to make it into a cli command. :class:`Group` wraps Commands and Groups to make them into applications. :class:`Context` is how groups and commands communicate.
+Commands and Groups are the building blocks for Click applications.
+{class}`Command` wraps a function to make it into a cli command. {class}`Group`
+wraps Commands and Groups to make them into applications. {class}`Context` is
+how groups and commands communicate.
 
-.. contents::
-   :depth: 2
-   :local:
+```{contents}
+---
+depth: 2
+local: true
+---
+```
 
-Commands
---------------------
+## Commands
 
-Basic Command Example
-^^^^^^^^^^^^^^^^^^^^^^^
+### Basic Command Example
+
 A simple command decorator takes no arguments.
 
+```{eval-rst}
 .. click:example::
+
     @click.command()
     @click.option('--count', default=1)
     def hello(count):
@@ -2962,12 +3206,16 @@ A simple command decorator takes no arguments.
 
 .. click:run::
     invoke(hello, args=['--count', '2',])
+```
 
-Renaming Commands
-^^^^^^^^^^^^^^^^^^^
-By default the command is the function name with underscores replaced by dashes. To change this pass the  desired name into the first positional argument.
+### Renaming Commands
 
+By default the command is the function name with underscores replaced by dashes.
+To change this pass the  desired name into the first positional argument.
+
+```{eval-rst}
 .. click:example::
+
     @click.command('say-hello')
     @click.option('--count', default=1)
     def hello(count):
@@ -2976,12 +3224,15 @@ By default the command is the function name with underscores replaced by dashes.
 
 .. click:run::
     invoke(hello, args=['--count', '2',])
+```
 
-Deprecating Commands
-^^^^^^^^^^^^^^^^^^^^^^
-To mark a command as deprecated pass in ``deprecated=True``
+### Deprecating Commands
 
+To mark a command as deprecated pass in `deprecated=True`
+
+```{eval-rst}
 .. click:example::
+
     @click.command('say-hello', deprecated=True)
     @click.option('--count', default=1)
     def hello(count):
@@ -2990,15 +3241,19 @@ To mark a command as deprecated pass in ``deprecated=True``
 
 .. click:run::
     invoke(hello, args=['--count', '2',])
+```
 
-Groups
-------------
+## Groups
 
-Basic Group Example
-^^^^^^^^^^^^^^^^^^^^^
-A group wraps one or more commands. After being wrapped, the commands are nested under that group. You can see that on the help pages and in the execution. By default, invoking the group with no command shows the help page.
+### Basic Group Example
 
+A group wraps one or more commands. After being wrapped, the commands are nested
+under that group. You can see that on the help pages and in the execution. By
+default, invoking the group with no command shows the help page.
+
+```{eval-rst}
 .. click:example::
+
     @click.group()
     def greeting():
         click.echo('Starting greeting ...')
@@ -3021,14 +3276,19 @@ At the command level:
 
     invoke(greeting, args=['say-hello'])
     invoke(greeting, args=['say-hello', '--help'])
+```
 
-As you can see from the above example, the function wrapped by the group decorator executes unless it is interrupted (for example by calling the help).
+As you can see from the above example, the function wrapped by the group
+decorator executes unless it is interrupted (for example by calling the help).
 
-Renaming Groups
-^^^^^^^^^^^^^^^^^
-To have a name other than the decorated function name as the group name, pass it in as the first positional argument.
+### Renaming Groups
 
+To have a name other than the decorated function name as the group name, pass it
+in as the first positional argument.
+
+```{eval-rst}
 .. click:example::
+
     @click.group('greet-someone')
     def greeting():
         click.echo('Starting greeting ...')
@@ -3042,12 +3302,17 @@ To have a name other than the decorated function name as the group name, pass it
 .. click:run::
 
     invoke(greeting, args=['say-hello'])
+```
 
-Group Invocation Without Command
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+### Group Invocation Without Command
 
-By default, if a group is passed without a command, the group is not invoked and a command automatically passes ``--help``. To change this, pass ``invoke_without_command=True`` to the group. The context object also includes information about whether or not the group invocation would go to a command nested under it.
+By default, if a group is passed without a command, the group is not invoked and
+a command automatically passes `--help`. To change this, pass
+`invoke_without_command=True` to the group. The context object also includes
+information about whether or not the group invocation would go to a command
+nested under it.
 
+```{eval-rst}
 .. click:example::
 
     @click.group(invoke_without_command=True)
@@ -3066,14 +3331,15 @@ By default, if a group is passed without a command, the group is not invoked and
 
     invoke(cli, prog_name='tool', args=[])
     invoke(cli, prog_name='tool', args=['sync'])
+```
 
+### Group Separation
 
+Command {ref}`parameters` attached to a command belong only to that command.
 
-Group Separation
-^^^^^^^^^^^^^^^^^^^
-Command :ref:`parameters` attached to a command belong only to that command.
-
+```{eval-rst}
 .. click:example::
+
     @click.group()
     def greeting():
         pass
@@ -3095,19 +3361,27 @@ Command :ref:`parameters` attached to a command belong only to that command.
     invoke(greeting, args=['hello', '--count', '2'])
     invoke(greeting, args=['goodbye', '--count', '2'])
     invoke(greeting)
+```
 
-Additionally parameters for a given group belong only to that group and not to the commands under it. What this means is that options and arguments for a specific command have to be specified *after* the command name itself, but *before* any other command names.
+Additionally parameters for a given group belong only to that group and not to
+the commands under it. What this means is that options and arguments for a
+specific command have to be specified *after* the command name itself, but
+*before* any other command names.
 
-This behavior is observable with the ``--help`` option. Suppose we have a group called ``tool`` containing a command called ``sub``.
+This behavior is observable with the `--help` option. Suppose we have a group
+called `tool` containing a command called `sub`.
 
-- ``tool --help`` returns the help for the whole program (listing subcommands).
-- ``tool sub --help`` returns the help for the ``sub`` subcommand.
-- But ``tool --help sub`` treats ``--help`` as an argument for the main program. Click then invokes the callback for ``--help``, which prints the help and aborts the program before click can process the subcommand.
+- `tool --help` returns the help for the whole program (listing subcommands).
+- `tool sub --help` returns the help for the `sub` subcommand.
+- But `tool --help sub` treats `--help` as an argument for the main program.
+  Click then invokes the callback for `--help`, which prints the help and aborts
+  the program before click can process the subcommand.
 
-Arbitrary Nesting
-^^^^^^^^^^^^^^^^^^^
-:class:`Commands <Command>` are attached to a :class:`Group`. Multiple groups can be attached to another group. Groups containing multiple groups can be attached to a group, and so on. To invoke a command nested under multiple groups, all the groups under which it is nested must be invoked.
+### Arbitrary Nesting
 
+{class}`Commands <Command>` are attached to a {class}`Group`. Multiple groups can be attached to another group. Groups containing multiple groups can be attached to a group, and so on. To invoke a command nested under multiple groups, all the groups under which it is nested must be invoked.
+
+```{eval-rst}
 .. click:example::
 
     @click.group()
@@ -3130,11 +3404,16 @@ Arbitrary Nesting
 .. click:run::
 
     invoke(cli, args=['session', 'initdb'])
+```
 
-Lazily Attaching Commands
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Most examples so far have attached the commands to a group immediately, but commands may be registered later. This could be used to split commands into multiple Python modules. Regardless of how they are attached, the commands are invoked identically.
+### Lazily Attaching Commands
 
+Most examples so far have attached the commands to a group immediately, but
+commands may be registered later. This could be used to split commands into
+multiple Python modules. Regardless of how they are attached, the commands are
+invoked identically.
+
+```{eval-rst}
 .. click:example::
 
     @click.group()
@@ -3155,18 +3434,23 @@ Most examples so far have attached the commands to a group immediately, but comm
 
     invoke(cli, args=['initdb'])
     invoke(cli, args=['dropdb'])
+```
 
-Context Object
--------------------
-The :class:`Context` object is how commands and groups communicate.
+## Context Object
+The {class}`Context` object is how commands and groups communicate.
 
-Auto Envvar Prefix
-^^^^^^^^^^^^^^^^^^^^
-Automatically built environment variables are supported for options only. To enable this feature, the ``auto_envvar_prefix`` parameter needs to be passed to the script that is invoked.  Each command and parameter is then added as an uppercase underscore-separated variable.  If you have a subcommand
-called ``run`` taking an option called ``reload`` and the prefix is ``WEB``, then the variable is ``WEB_RUN_RELOAD``.
+### Auto Envvar Prefix
+
+Automatically built environment variables are supported for options only. To
+enable this feature, the `auto_envvar_prefix` parameter needs to be passed to
+the script that is invoked.  Each command and parameter is then added as an
+uppercase underscore-separated variable.  If you have a subcommand
+called `run` taking an option called `reload` and the prefix is `WEB`, then the
+variable is `WEB_RUN_RELOAD`.
 
 Example usage:
 
+```{eval-rst}
 .. click:example::
 
     @click.command()
@@ -3183,13 +3467,15 @@ And from the command line:
 
     invoke(greet, env={'GREETER_USERNAME': 'john'},
            auto_envvar_prefix='GREETER')
+```
 
-When using ``auto_envvar_prefix`` with command groups, the command name
+When using `auto_envvar_prefix` with command groups, the command name
 needs to be included in the environment variable, between the prefix and
-the parameter name, *i.e.* ``PREFIX_COMMAND_VARIABLE``. If you have a
-subcommand called ``run-server`` taking an option called ``host`` and
-the prefix is ``WEB``, then the variable is ``WEB_RUN_SERVER_HOST``.
+the parameter name, *i.e.* `PREFIX_COMMAND_VARIABLE`. If you have a
+subcommand called `run-server` taking an option called `host` and
+the prefix is `WEB`, then the variable is `WEB_RUN_SERVER_HOST`.
 
+```{eval-rst}
 .. click:example::
 
    @click.group()
@@ -3210,31 +3496,35 @@ the prefix is ``WEB``, then the variable is ``WEB_RUN_SERVER_HOST``.
    invoke(cli, args=['greet',],
           env={'GREETER_GREET_USERNAME': 'John', 'GREETER_DEBUG': 'false'},
           auto_envvar_prefix='GREETER')
+```
 
-Global Context Access
-^^^^^^^^^^^^^^^^^^^^^^
+### Global Context Access
 
-.. versionadded:: 5.0
+```{versionadded} 5.0
+```
 
 Starting with Click 5.0 it is possible to access the current context from
 anywhere within the same thread through the use of the
-:func:`get_current_context` function which returns it.  This is primarily
+{func}`get_current_context` function which returns it.  This is primarily
 useful for accessing the context bound object as well as some flags that
 are stored on it to customize the runtime behavior.  For instance the
-:func:`echo` function does this to infer the default value of the `color`
+{func}`echo` function does this to infer the default value of the `color`
 flag.
 
-Example usage::
+Example usage:
 
+```python
     def get_current_command_name():
         return click.get_current_context().info_name
+```
 
 It should be noted that this only works within the current thread.  If you
 spawn additional threads then those threads will not have the ability to
 refer to the current context.  If you want to give another thread the
 ability to refer to this context you need to use the context within the
-thread as a context manager::
+thread as a context manager:
 
+```python
     def spawn_thread(ctx, func):
         def wrapper():
             with ctx:
@@ -3242,6 +3532,7 @@ thread as a context manager::
         t = threading.Thread(target=wrapper)
         t.start()
         return t
+```
 
 Now the thread function can access the context like the main thread would
 do.  However if you do use this for threading you need to be very careful
@@ -3250,16 +3541,45 @@ allowed to read from the context, but not to perform any modifications on
 it.
 
 
-Detecting the Source of a Parameter
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+### Parameter Source Priority
+
+When a parameter's value is resolved, Click checks several sources
+in the following order of precedence:
+
+1.  **Prompt** (`PROMPT`): interactively provided by the user at a prompt.
+2.  **Command line** (`COMMANDLINE`): provided as a CLI argument or option.
+3.  **Environment variable** (`ENVIRONMENT`): read from an environment variable.
+4.  **Default map** (`DEFAULT_MAP`): looked up from {attr}`Context.default_map`.
+5.  **Default** (`DEFAULT`): the default value defined on the parameter.
+
+{class}`~click.core.ParameterSource` members are ordered from most
+explicit to least explicit. Because it is an {class}`~enum.IntEnum`,
+you can use comparison operators to check how explicitly a value was
+provided:
+
+```python
+source = ctx.get_parameter_source("port")
+
+# True if the value was explicitly set (command line, prompt, or env var).
+if source < click.ParameterSource.DEFAULT_MAP:
+    ...
+
+# True if the value came from any kind of default.
+if source >= click.ParameterSource.DEFAULT_MAP:
+    ...
+```
+
+
+### Detecting the Source of a Parameter
 
 In some situations it's helpful to understand whether or not an option
 or parameter came from the command line, the environment, the default
-value, or :attr:`Context.default_map`. The
-:meth:`Context.get_parameter_source` method can be used to find this
-out. It will return a member of the :class:`~click.core.ParameterSource`
+value, or {attr}`Context.default_map`. The
+{meth}`Context.get_parameter_source` method can be used to find this
+out. It will return a member of the {class}`~click.core.ParameterSource`
 enum.
 
+```{eval-rst}
 .. click:example::
 
     @click.command()
@@ -3277,36 +3597,41 @@ enum.
     println()
     invoke(cli, prog_name='cli', args=[])
     println()
-
 ```
+
+````
 ---
 
-## docs/commands.rst
+## docs/commands.md
 
-```text
-Advanced Groups and Context
-=============================
+````markdown
+# Advanced Groups and Context
 
-.. currentmodule:: click
+```{currentmodule} click
+```
 
-In addition to the capabilities covered in the previous section, Groups have more advanced capabilities that leverage the Context.
+In addition to the capabilities covered in the previous section, Groups have
+more advanced capabilities that leverage the Context.
 
-.. contents::
-   :depth: 1
-   :local:
+```{contents}
+---
+depth: 1
+local: true
+---
+```
 
-Callback Invocation
--------------------
+## Callback Invocation
 
 For a regular command, the callback is executed whenever the command runs.
 If the script is the only command, it will always fire (unless a parameter
 callback prevents it.  This for instance happens if someone passes
-``--help`` to the script).
+`--help` to the script).
 
 For groups, the situation looks different. In this case, the callback fires
 whenever a subcommand fires.  What this means in practice is that an outer
 command runs when an inner command runs:
 
+```{eval-rst}
 .. click:example::
 
     @click.group()
@@ -3325,9 +3650,9 @@ Here is what this looks like:
     invoke(cli, prog_name='tool.py')
     println()
     invoke(cli, prog_name='tool.py', args=['--debug', 'sync'])
+```
 
-Nested Handling and Contexts
-----------------------------
+## Nested Handling and Contexts
 
 As you can see from the earlier example, the basic command group accepts a
 debug argument which is passed to its callback, but not to the sync
@@ -3335,19 +3660,20 @@ command itself.  The sync command only accepts its own arguments.
 
 This allows tools to act completely independent of each other, but how
 does one command talk to a nested one?  The answer to this is the
-:class:`Context`.
+{class}`Context`.
 
 Each time a command is invoked, a new context is created and linked with the
 parent context.  Normally, you can't see these contexts, but they are
 there.  Contexts are passed to parameter callbacks together with the
 value automatically.  Commands can also ask for the context to be passed
-by marking themselves with the :func:`pass_context` decorator.  In that
+by marking themselves with the {func}`pass_context` decorator.  In that
 case, the context is passed as first argument.
 
 The context can also carry a program specified object that can be
 used for the program's purposes.  What this means is that you can build a
 script like this:
 
+```{eval-rst}
 .. click:example::
 
     @click.group()
@@ -3367,21 +3693,21 @@ script like this:
 
     if __name__ == '__main__':
         cli(obj={})
+```
 
 If the object is provided, each context will pass the object onwards to
 its children, but at any level a context's object can be overridden.  To
-reach to a parent, ``context.parent`` can be used.
+reach to a parent, `context.parent` can be used.
 
 In addition to that, instead of passing an object down, nothing stops the
 application from modifying global state.  For instance, you could just flip
-a global ``DEBUG`` variable and be done with it.
+a global `DEBUG` variable and be done with it.
 
-Decorating Commands
--------------------
+## Decorating Commands
 
 As you have seen in the earlier example, a decorator can change how a
 command is invoked.  What actually happens behind the scenes is that
-callbacks are always invoked through the :meth:`Context.invoke` method
+callbacks are always invoked through the {meth}`Context.invoke` method
 which automatically invokes a command correctly (by either passing the
 context or not).
 
@@ -3391,8 +3717,9 @@ state and then storing it on the context and then to use a custom
 decorator to find the most recent object of this sort and pass it as first
 argument.
 
-For instance, the :func:`pass_obj` decorator can be implemented like this:
+For instance, the {func}`pass_obj` decorator can be implemented like this:
 
+```{eval-rst}
 .. click:example::
 
     from functools import update_wrapper
@@ -3402,24 +3729,25 @@ For instance, the :func:`pass_obj` decorator can be implemented like this:
         def new_func(ctx, *args, **kwargs):
             return ctx.invoke(f, ctx.obj, *args, **kwargs)
         return update_wrapper(new_func, f)
+```
 
-The :meth:`Context.invoke` command will automatically invoke the function
-in the correct way, so the function will either be called with ``f(ctx,
-obj)`` or ``f(obj)`` depending on whether or not it itself is decorated with
-:func:`pass_context`.
+The {meth}`Context.invoke` command will automatically invoke the function
+in the correct way, so the function will either be called with`f(ctx,
+obj)` or `f(obj)` depending on whether or not it itself is decorated with
+{func}`pass_context`.
 
 This is a very powerful concept that can be used to build very complex
-nested applications; see :ref:`complex-guide` for more information.
+nested applications; see {ref}`complex-guide` for more information.
 
-.. _command-chaining:
+(command-chaining)=
 
-Command Chaining
-----------------
+## Command Chaining
 
 It is useful to invoke more than one subcommand in one call. For example,
-``my-app validate build upload`` would invoke ``validate``, then ``build``, then
-``upload``. To implement this, pass ``chain=True`` when creating a group.
+`my-app validate build upload` would invoke `validate`, then `build`, then
+`upload`. To implement this, pass `chain=True` when creating a group.
 
+```{eval-rst}
 .. click:example::
 
     @click.group(chain=True)
@@ -3439,28 +3767,29 @@ You can invoke it like this:
 .. click:run::
 
     invoke(cli, prog_name='my-app', args=['validate', 'build'])
+```
 
 When using chaining, there are a few restrictions:
 
--   Only the last command may use ``nargs=-1`` on an argument, otherwise the
-    parser will not be able to find further commands.
--   It is not possible to nest groups below a chain group.
--   On the command line, options must be specified before arguments for each
-    command in the chain.
--   The :attr:`Context.invoked_subcommand` attribute will be ``'*'`` because the
-    parser doesn't know the full list of commands that will run yet.
+- Only the last command may use `nargs=-1` on an argument, otherwise the
+  parser will not be able to find further commands.
+- It is not possible to nest groups below a chain group.
+- On the command line, options must be specified before arguments for each
+  command in the chain.
+- The {attr}`Context.invoked_subcommand` attribute will be `'*'` because the
+  parser doesn't know the full list of commands that will run yet.
 
-.. _command-pipelines:
+(command-pipelines)=
 
-Command Pipelines
-------------------
+## Command Pipelines
 
 When using chaining, a common pattern is to have each command process the
 result of the previous command.
 
-A straightforward way to do this is to use :func:`make_pass_decorator` to pass
+A straightforward way to do this is to use {func}`make_pass_decorator` to pass
 a context object to each command, and store and read the data on that object.
 
+```{eval-rst}
 .. click:example::
 
     pass_ns = click.make_pass_decorator(dict, ensure=True)
@@ -3484,9 +3813,10 @@ a context object to each command, and store and read the data on that object.
 .. click:run::
 
     invoke(cli, prog_name="process", args=["Click", "show", "lower", "show"])
+```
 
 Another way to do this is to collect data returned by each command, then process
-it at the end of the chain. Use the group's :meth:`~Group.result_callback`
+it at the end of the chain. Use the group's {meth}`~Group.result_callback`
 decorator to register a function that is called after the chain is finished. It
 is passed the list of return values as well as any parameters registered on the
 group.
@@ -3497,60 +3827,60 @@ result callback calls each function. The command takes a file, processes each
 line, then outputs it. If no subcommands are given, it outputs the contents
 of the file unchanged.
 
-.. code-block:: python
+```python
+@click.group(chain=True, invoke_without_command=True)
+@click.argument("fin", type=click.File("r"))
+def cli(fin):
+    pass
 
-    @click.group(chain=True, invoke_without_command=True)
-    @click.argument("fin", type=click.File("r"))
-    def cli(fin):
-        pass
+@cli.result_callback()
+def process_pipeline(processors, fin):
+    iterator = (x.rstrip("\r\n") for x in input)
 
-    @cli.result_callback()
-    def process_pipeline(processors, fin):
-        iterator = (x.rstrip("\r\n") for x in input)
+    for processor in processors:
+        iterator = processor(iterator)
 
-        for processor in processors:
-            iterator = processor(iterator)
+    for item in iterator:
+        click.echo(item)
 
-        for item in iterator:
-            click.echo(item)
+@cli.command("upper")
+def make_uppercase():
+    def processor(iterator):
+        for line in iterator:
+            yield line.upper()
+    return processor
 
-    @cli.command("upper")
-    def make_uppercase():
-        def processor(iterator):
-            for line in iterator:
-                yield line.upper()
-        return processor
+@cli.command("lower")
+def make_lowercase():
+    def processor(iterator):
+        for line in iterator:
+            yield line.lower()
+    return processor
 
-    @cli.command("lower")
-    def make_lowercase():
-        def processor(iterator):
-            for line in iterator:
-                yield line.lower()
-        return processor
-
-    @cli.command("strip")
-    def make_strip():
-        def processor(iterator):
-            for line in iterator:
-                yield line.strip()
-        return processor
+@cli.command("strip")
+def make_strip():
+    def processor(iterator):
+        for line in iterator:
+            yield line.strip()
+    return processor
+```
 
 That's a lot in one go, so let's go through it step by step.
 
-1.  The first thing is to make a :func:`group` that is chainable.  In
-    addition to that we also instruct Click to invoke even if no
-    subcommand is defined.  If this would not be done, then invoking an
-    empty pipeline would produce the help page instead of running the
-    result callbacks.
-2.  The next thing we do is to register a result callback on our group.
-    This callback will be invoked with an argument which is the list of
-    all return values of all subcommands and then the same keyword
-    parameters as our group itself.  This means we can access the input
-    file easily there without having to use the context object.
-3.  In this result callback we create an iterator of all the lines in the
-    input file and then pass this iterator through all the returned
-    callbacks from all subcommands and finally we print all lines to
-    stdout.
+1. The first thing is to make a {func}`group` that is chainable.  In
+   addition to that we also instruct Click to invoke even if no
+   subcommand is defined.  If this would not be done, then invoking an
+   empty pipeline would produce the help page instead of running the
+   result callbacks.
+2. The next thing we do is to register a result callback on our group.
+   This callback will be invoked with an argument which is the list of
+   all return values of all subcommands and then the same keyword
+   parameters as our group itself.  This means we can access the input
+   file easily there without having to use the context object.
+3. In this result callback we create an iterator of all the lines in the
+   input file and then pass this iterator through all the returned
+   callbacks from all subcommands and finally we print all lines to
+   stdout.
 
 After that point we can register as many subcommands as we want and each
 subcommand can return a processor function to modify the stream of lines.
@@ -3561,22 +3891,19 @@ cannot be accessed in the `processor` functions as the files will already
 be closed there.  This limitation is unlikely to change because it would
 make resource handling much more complicated.  For such it's recommended
 to not use the file type and manually open the file through
-:func:`open_file`.
+{func}`open_file`.
 
 For a more complex example that also improves upon handling of the pipelines,
-see the `imagepipe example`_ in the Click repository. It implements a
-pipeline based image editing tool that has a nice internal structure.
+see the [imagepipe example](https://github.com/pallets/click/tree/main/examples/imagepipe)
+in the Click repository. It implements a pipeline based image editing tool
+that has a nice internal structure.
 
-.. _imagepipe example: https://github.com/pallets/click/tree/main/examples/imagepipe
-
-
-Overriding Defaults
--------------------
+## Overriding Defaults
 
 By default, the default value for a parameter is pulled from the
-``default`` flag that is provided when it's defined, but that's not the
+`default` flag that is provided when it's defined, but that's not the
 only place defaults can be loaded from.  The other place is the
-:attr:`Context.default_map` (a dictionary) on the context.  This allows
+{attr}`Context.default_map` (a dictionary) on the context.  This allows
 defaults to be loaded from a configuration file to override the regular
 defaults.
 
@@ -3585,12 +3912,13 @@ you're not satisfied with the defaults.
 
 The default map can be nested arbitrarily for each subcommand:
 
-.. code-block:: python
+```python
 
     default_map = {
         "debug": True,  # default for a top level option
         "runserver": {"port": 5000}  # default for a subcommand
     }
+```
 
 The default map can be provided when the script is invoked, or
 overridden at any point by commands. For instance, a top-level command
@@ -3598,6 +3926,7 @@ could load the defaults from a configuration file.
 
 Example usage:
 
+```{eval-rst}
 .. click:example::
 
     import click
@@ -3627,19 +3956,50 @@ And in action:
             'port': 5000
         }
     })
+```
 
-Context Defaults
-----------------
+### Multi-value parameters
 
-.. versionadded:: 2.0
+When a `default_map` value is a string for a parameter with `nargs > 1` or a
+{class}`Tuple` type, the string is split automatically, the same way an
+environment variable would be. By default, values are split on whitespace. See
+[Multiple Options from Environment
+Values](options.md#multiple-options-from-environment-values) for details on
+splitting behavior.
+
+```python
+default_map = {
+    "draw": {
+        "point": "3 4",  # split into ("3", "4") for nargs=2
+        "color": "red",  # passed as-is for nargs=1
+    }
+}
+```
+
+You can also pass an already-structured tuple or list, which will be used as-is
+without splitting:
+
+```python
+default_map = {
+    "draw": {
+        "point": (3, 4),  # used directly
+    }
+}
+```
+
+## Context Defaults
+
+```{versionadded} 2.0
+```
 
 Starting with Click 2.0 you can override defaults for contexts not just
 when calling your script, but also in the decorator that declares a
 command.  For instance given the previous example which defines a custom
-``default_map`` this can also be accomplished in the decorator now.
+`default_map` this can also be accomplished in the decorator now.
 
 This example does the same as the previous example:
 
+```{eval-rst}
 .. click:example::
 
     import click
@@ -3665,12 +4025,12 @@ And again the example in action:
 .. click:run::
 
     invoke(cli, prog_name='cli', args=['runserver'])
+```
 
+## Command Return Values
 
-Command Return Values
----------------------
-
-.. versionadded:: 3.0
+```{versionadded} 3.0
+```
 
 One of the new introductions in Click 3.0 is the full support for return
 values from command callbacks.  This enables a whole range of features
@@ -3678,47 +4038,47 @@ that were previously hard to implement.
 
 In essence any command callback can now return a value.  This return value
 is bubbled to certain receivers.  One usecase for this has already been
-show in the example of :ref:`command-chaining` where it has been
+show in the example of {ref}`command-chaining` where it has been
 demonstrated that chained groups can have callbacks that process
 all return values.
 
 When working with command return values in Click, this is what you need to
 know:
 
--   The return value of a command callback is generally returned from the
-    :meth:`Command.invoke` method.  The exception to this rule has to
-    do with :class:`Group`\s:
+- The return value of a command callback is generally returned from the
+  {meth}`Command.invoke` method.  The exception to this rule has to
+  do with {class}`Group`s:
 
-    *   In a group the return value is generally the return value of the
-        subcommand invoked.  The only exception to this rule is that the
-        return value is the return value of the group callback if it's
-        invoked without arguments and `invoke_without_command` is enabled.
-    *   If a group is set up for chaining then the return value is a list
-        of all subcommands' results.
-    *   Return values of groups can be processed through a
-        :attr:`Group.result_callback`.  This is invoked with the
-        list of all return values in chain mode, or the single return
-        value in case of non chained commands.
+  - In a group the return value is generally the return value of the
+    subcommand invoked.  The only exception to this rule is that the
+    return value is the return value of the group callback if it's
+    invoked without arguments and `invoke_without_command` is enabled.
+  - If a group is set up for chaining then the return value is a list
+    of all subcommands' results.
+  - Return values of groups can be processed through a
+    {attr}`Group.result_callback`.  This is invoked with the
+    list of all return values in chain mode, or the single return
+    value in case of non chained commands.
 
--   The return value is bubbled through from the :meth:`Context.invoke`
-    and :meth:`Context.forward` methods.  This is useful in situations
-    where you internally want to call into another command.
+- The return value is bubbled through from the {meth}`Context.invoke`
+  and {meth}`Context.forward` methods.  This is useful in situations
+  where you internally want to call into another command.
 
--   Click does not have any hard requirements for the return values and
-    does not use them itself.  This allows return values to be used for
-    custom decorators or workflows (like in the command chaining
-    example).
+- Click does not have any hard requirements for the return values and
+  does not use them itself.  This allows return values to be used for
+  custom decorators or workflows (like in the command chaining
+  example).
 
--   When a Click script is invoked as command line application (through
-    :meth:`Command.main`) the return value is ignored unless the
-    `standalone_mode` is disabled in which case it's bubbled through.
+- When a Click script is invoked as command line application (through
+  {meth}`Command.main`) the return value is ignored unless the
+  `standalone_mode` is disabled in which case it's bubbled through.
 
-```
+````
 ---
 
 ## docs/complex.md
 
-```markdown
+````markdown
 (complex-guide)=
 
 # Complex Applications
@@ -4106,7 +4466,7 @@ attributes, it has no awareness that the underlying function is in any way handl
 deferred import. Therefore, all Click-provided utilities and functionality will work
 as normal on such a command.
 
-```
+````
 ---
 
 ## docs/conf.py
@@ -4145,6 +4505,7 @@ extlinks = {
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3/", None),
 }
+myst_heading_anchors = 3
 
 # HTML -----------------------------------------------------------------
 
@@ -4175,7 +4536,7 @@ html_show_sourcelink = False
 
 ## docs/contrib.md
 
-```markdown
+````markdown
 (contrib)=
 
 # click-contrib
@@ -4222,12 +4583,63 @@ If a project is no longer maintained or does not meet the criteria above,
 please open a pull request to remove it from the list.
 ```
 
-```
+````
+---
+
+## docs/contributing.md
+
+````markdown
+# Contributing
+
+This is a quick reference for Click-specific development
+tasks. For setting up the development environment and the
+general contribution workflow, see the Pallets [quick
+reference](https://palletsprojects.com/contributing/quick/)
+and the [detailed contributing
+guide](https://palletsprojects.com/contributing/).
+
+## Extra Test Environments
+
+Click includes some extra test environments:
+
+-   `tox r -e stress` runs stress tests for race conditions
+    in Click's test runner.
+
+    ```shell-session
+    $ tox r -e stress
+    ```
+
+-   `tox r -e random` runs tests in parallel in a random
+    order to detect test pollution.
+
+    ```shell-session
+    $ tox r -e random
+    ```
+
+-   A CI workflow (`.github/workflows/test-flask.yaml`)
+    runs Flask's test suite to catch downstream
+    regressions.
+
+## Code Style
+
+Avoid ternary expressions (`x if cond else y`): coverage
+cannot measure both branches. Use an explicit `if`/`else`
+block instead.
+
+Do not add unnecessary dependencies. If a feature can be
+implemented with the standard library, do not pull in an
+external package for it.
+
+## Formatting
+
+Wrap lines in Markdown files at 80 characters.
+
+````
 ---
 
 ## docs/design-opinions.md
 
-```markdown
+````markdown
 # CLI Design Opinions
 
 ```{currentmodule} click
@@ -4248,12 +4660,12 @@ A penny for your thoughts...
     - A command acts on some files.
     - A command looks at a source and acts on a destination.
 
-```
+````
 ---
 
 ## docs/documentation.md
 
-```markdown
+````markdown
 # Help Pages
 
 ```{currentmodule} click
@@ -4548,12 +4960,12 @@ instead of just `--help`:
     invoke(cli, ['-h'])
 ```
 
-```
+````
 ---
 
 ## docs/entry-points.md
 
-```markdown
+````markdown
 # Packaging Entry Points
 
 ```{eval-rst}
@@ -4643,12 +5055,12 @@ $ hello
 Hello, World!
 ```
 
-```
+````
 ---
 
 ## docs/exceptions.md
 
-```markdown
+````markdown
 (exception-handling-exit-codes)=
 
 # Exception Handling and Exit Codes
@@ -4786,12 +5198,12 @@ The above invocation returns exit code 2 since the user invoked the command inco
     invoke(printer_group, args=[])
 ```
 
-```
+````
 ---
 
 ## docs/extending-click.md
 
-```markdown
+````markdown
 # Extending Click
 
 ```{currentmodule} click
@@ -4925,12 +5337,12 @@ It can be used like this:
 
 See the [alias example](https://github.com/pallets/click/tree/main/examples/aliases) in Click's repository for another example.
 
-```
+````
 ---
 
 ## docs/faqs.md
 
-```markdown
+````markdown
 # Frequently Asked Questions
 
 ```{contents}
@@ -4971,12 +5383,12 @@ Note that I used single quotes above, so my shell is not expanding the environme
 If you don't want Click to emulate (as best it can) unix expansion on Windows, pass windows_expand_args=False when calling the CLI.
 Windows command line doesn't do any *, ~, or $ENV expansion. It also doesn't distinguish between double quotes and single quotes (where the later means "don't expand here"). Click emulates the expansion so that the app behaves similarly on both platforms, but doesn't receive information about what quotes were used.
 
-```
+````
 ---
 
 ## docs/handling-files.md
 
-```markdown
+````markdown
 (handling-files)=
 
 # Handling Files
@@ -5080,24 +5492,22 @@ It is also possible to open files in atomic mode by passing `atomic=True`. In at
 file in the same folder, and upon completion, the file will be moved over to the original location. This is useful if a
 file regularly read by other users is modified.
 
-```
+````
 ---
 
-## docs/index.rst
+## docs/index.md
 
-```text
-.. rst-class:: hide-header
+````markdown
+#
 
-Welcome to Click
-================
-
-.. image:: _static/click-name.svg
-    :align: center
-    :height: 200px
+```{image} _static/click-name.svg
+:align: center
+:height: 200px
+```
 
 Click is a Python package for creating beautiful command line interfaces
-in a composable way with as little code as necessary.  It's the "Command
-Line Interface Creation Kit".  It's highly configurable but comes with
+in a composable way with as little code as necessary. It's the "Command
+Line Interface Creation Kit". It's highly configurable but comes with
 sensible defaults out of the box.
 
 It aims to make the process of writing command line tools quick and fun
@@ -5106,12 +5516,13 @@ an intended CLI API.
 
 Click in three points:
 
--   arbitrary nesting of commands
--   automatic help page generation
--   supports lazy loading of subcommands at runtime
+- arbitrary nesting of commands
+- automatic help page generation
+- supports lazy loading of subcommands at runtime
 
-What does it look like?  Here is an example of a simple Click program:
+What does it look like? Here is an example of a simple Click program:
 
+```{eval-rst}
 .. click:example::
 
     import click
@@ -5128,116 +5539,124 @@ What does it look like?  Here is an example of a simple Click program:
     if __name__ == '__main__':
         hello()
 
+
 And what it looks like when run:
+
 
 .. click:run::
 
     invoke(hello, ['--count=3'], prog_name='python hello.py', input='John\n')
 
+
 It automatically generates nicely formatted help pages:
+
 
 .. click:run::
 
     invoke(hello, ['--help'], prog_name='python hello.py')
+```
 
-You can get the library directly from PyPI::
-
-    pip install click
-
-Documentation
-==============
-
-.. toctree::
-   :maxdepth: 2
-
-   faqs
-
-Tutorials
-------------
-.. toctree::
-   :maxdepth: 1
-
-   quickstart
-   virtualenv
-
-How to Guides
----------------
-.. toctree::
-   :maxdepth: 1
-
-   entry-points
-   setuptools
-   upgrade-guides
-   support-multiple-versions
-
-Conceptual Guides
--------------------
-.. toctree::
-   :maxdepth: 1
-
-   design-opinions
-   why
-   click-concepts
-
-General Reference
---------------------
-
-.. toctree::
-   :maxdepth: 1
-
-   parameters
-   parameter-types
-   options
-   option-decorators
-   arguments
-   commands-and-groups
-   commands
-   documentation
-   prompts
-   handling-files
-   advanced
-   complex
-   extending-click
-   testing
-   utils
-   shell-completion
-   exceptions
-   command-line-reference
-   unicode-support
-   wincmd
-
-API Reference
--------------------
-
-.. toctree::
-   :maxdepth: 2
-
-   api
-
-About Project
-===============
-
-* This documentation is structured according to `Diataxis <https://diataxis.fr/>`_ and written with `MyST <https://myst-parser.readthedocs.io/en/latest/>`_
-
-* `Version Policy <https://palletsprojects.com/versions>`_
-
-* `Contributing <https://palletsprojects.com/contributing/>`_
-
-* `Donate <https://palletsprojects.com/donate>`_
-
-.. toctree::
-   :maxdepth: 1
-
-   contrib
-   license
-   changes
+You can get the library directly from PyPI:
 
 ```
+pip install click
+```
+
+# Documentation
+
+```{toctree}
+:maxdepth: 2
+
+faqs
+```
+
+## Tutorials
+
+```{toctree}
+:maxdepth: 1
+
+quickstart
+virtualenv
+```
+
+## How to Guides
+
+```{toctree}
+:maxdepth: 1
+
+entry-points
+setuptools
+standalone-apps
+upgrade-guides
+support-multiple-versions
+```
+
+## Conceptual Guides
+
+```{toctree}
+:maxdepth: 1
+
+design-opinions
+why
+click-concepts
+```
+
+## General Reference
+
+```{toctree}
+:maxdepth: 1
+
+parameters
+parameter-types
+options
+option-decorators
+arguments
+commands-and-groups
+commands
+documentation
+prompts
+handling-files
+advanced
+complex
+extending-click
+testing
+utils
+shell-completion
+exceptions
+command-line-reference
+unicode-support
+wincmd
+```
+
+## API Reference
+
+```{toctree}
+:maxdepth: 2
+
+api
+```
+
+# About Project
+
+- This documentation is structured according to [Diataxis](https://diataxis.fr/) and written with [MyST](https://myst-parser.readthedocs.io/en/latest/)
+- [Version Policy](https://palletsprojects.com/versions)
+- [Donate](https://palletsprojects.com/donate)
+
+```{toctree}
+:maxdepth: 1
+
+contributing
+contrib
+license
+changes
+```
+
+````
 ---
 
 ## docs/license.md
 
-```markdown
+````markdown
 # BSD-3-Clause License
 
 ```{literalinclude} ../LICENSE.txt
@@ -5246,12 +5665,12 @@ language: text
 ---
 ```
 
-```
+````
 ---
 
 ## docs/option-decorators.md
 
-```markdown
+````markdown
 # Options Shortcut Decorators
 
 ```{currentmodule} click
@@ -5339,945 +5758,4 @@ replaced with the :func:`confirmation_option` decorator:
 
 {func}`version_option` adds a `--version` option which immediately prints the version number and exits the program.
 
-```
----
-
-## docs/options.md
-
-```markdown
-(options)=
-
-# Options
-
-```{eval-rst}
-.. currentmodule:: click
-```
-
-Adding options to commands can be accomplished with the {func}`option`
-decorator. At runtime the decorator invokes the {class}`Option` class. Options in Click are distinct from {ref}`positional arguments <arguments>`.
-
-Useful and often used kwargs are:
-
-- `default`: Passes a default.
-- `help`: Sets help message.
-- `nargs`: Sets the number of arguments.
-- `required`: Makes option required.
-- `type`: Sets {ref}`parameter type <parameter-types>`
-
-```{contents}
-:depth: 2
-:local: true
-```
-
-## Option Decorator
-
-Click expects you to pass at least two positional arguments to the option decorator. They are option name and function argument name.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--string-to-echo', 'string_to_echo')
-    def echo(string_to_echo):
-        click.echo(string_to_echo)
-
-
-.. click:run::
-
-    invoke(echo, args=['--help'])
-```
-
-However, if you don't pass in the function argument name, then Click will try to infer it. A simple way to name your option is by taking the function argument, adding two dashes to the front and converting underscores to dashes. In this case, Click will infer the function argument name correctly so you can add only the option name.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--string-to-echo')
-    def echo(string_to_echo):
-        click.echo(string_to_echo)
-
-.. click:run::
-
-    invoke(echo, args=['--string-to-echo', 'Hi!'])
-```
-
-More formally, Click will try to infer the function argument name by:
-
-1. If a positional argument name does not have a prefix, it is chosen.
-2. If a positional argument name starts with with two dashes, the first one given is chosen.
-3. The first positional argument prefixed with one dash is chosen otherwise.
-
-The chosen positional argument is converted to lower case, up to two dashes are removed from the beginning, and other dashes are converted to underscores to get the function argument name.
-
-```{eval-rst}
-.. list-table:: Examples
-    :widths: 15 10
-    :header-rows: 1
-
-    * - Decorator Arguments
-      - Function Name
-    * - ``"-f", "--foo-bar"``
-      - foo_bar
-    * - ``"-x"``
-      - x
-    * - ``"-f", "--filename", "dest"``
-      - dest
-    * - ``"--CamelCase"``
-      - camelcase
-    * - ``"-f", "-fb"``
-      - f
-    * - ``"--f", "--foo-bar"``
-      - f
-    * - ``"---f"``
-      - _f
-```
-
-## Basic Example
-
-A simple {class}`click.Option` takes one argument. This will assume the argument is not required. If the decorated function takes an positional argument then None is passed it. This will also assume the type is `str`.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--text')
-    def print_this(text):
-        click.echo(text)
-
-
-.. click:run::
-
-    invoke(print_this, args=['--text=this'])
-
-    invoke(print_this, args=[])
-
-
-.. click:run::
-
-    invoke(print_this, args=['--help'])
-
-```
-
-## Setting a Default
-
-Instead of setting the `type`, you may set a default and Click will try to infer the type.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--n', default=1)
-    def dots(n):
-        click.echo('.' * n)
-
-.. click:run::
-
-    invoke(dots, args=['--help'])
-```
-
-## Multi Value Options
-
-To make an option take multiple values, pass in `nargs`. Note you may pass in any positive integer, but not -1. The values are passed to the underlying function as a tuple.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--pos', nargs=2, type=float)
-    def findme(pos):
-        a, b = pos
-        click.echo(f"{a} / {b}")
-
-.. click:run::
-
-    invoke(findme, args=['--pos', '2.0', '3.0'])
-
-```
-
-(tuple-type)=
-
-## Multi Value Options as Tuples
-
-```{versionadded} 4.0
-```
-
-As you can see that by using `nargs` set to a specific number each item in
-the resulting tuple is of the same type. This might not be what you want.
-Commonly you might want to use different types for different indexes in
-the tuple. For this you can directly specify a tuple as type:
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--item', type=(str, int))
-    def putitem(item):
-        name, id = item
-        click.echo(f"name={name} id={id}")
-
-
-And on the command line:
-
-.. click:run::
-
-    invoke(putitem, args=['--item', 'peter', '1338'])
-```
-
-By using a tuple literal as type, `nargs` gets automatically set to the
-length of the tuple and the {class}`click.Tuple` type is automatically
-used. The above example is thus equivalent to this:
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--item', nargs=2, type=click.Tuple([str, int]))
-    def putitem(item):
-        name, id = item
-        click.echo(f"name={name} id={id}")
-```
-
-(multiple-options)=
-
-## Multiple Options
-
-The multiple options format allows options to take an arbitrary number of arguments (which is called variadic). The arguments are passed to the underlying function as a tuple. If set, the default must be a list or tuple. Setting a string as a default will be interpreted as list of characters.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--message', '-m', multiple=True)
-    def commit(message):
-        click.echo(message)
-        for m in message:
-            click.echo(m)
-
-.. click:run::
-
-    invoke(commit, args=['-m', 'foo', '-m', 'bar', '-m', 'here'])
-```
-
-## Counting
-
-To count the occurrence of an option pass in `count=True`. If the option is not passed in, then the count is 0. Counting is commonly used for verbosity.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('-v', '--verbose', count=True)
-    def log(verbose):
-        click.echo(f"Verbosity: {verbose}")
-
-.. click:run::
-
-    invoke(log, args=[])
-    invoke(log, args=['-vvv'])
-```
-
-(option-boolean-flag)=
-
-## Boolean
-
-Boolean options (boolean flags) take the value True or False. The simplest case sets the default value to `False` if the flag is not passed, and `True` if it is.
-
-```{eval-rst}
-.. click:example::
-
-    import sys
-
-    @click.command()
-    @click.option('--shout', is_flag=True)
-    def info(shout):
-        rv = sys.platform
-        if shout:
-            rv = rv.upper() + '!!!!111'
-        click.echo(rv)
-
-
-.. click:run::
-
-    invoke(info)
-    invoke(info, args=['--shout'])
-
-```
-
-To implement this more explicitly, pass in on-option `/` off-option. Click will automatically set `is_flag=True`.
-
-```{eval-rst}
-.. click:example::
-
-    import sys
-
-    @click.command()
-    @click.option('--shout/--no-shout', default=False)
-    def info(shout):
-        rv = sys.platform
-        if shout:
-            rv = rv.upper() + '!!!!111'
-        click.echo(rv)
-
-.. click:run::
-
-    invoke(info)
-    invoke(info, args=['--shout'])
-    invoke(info, args=['--no-shout'])
-```
-
-Use cases for this more explicit pattern include:
-
-* The default can be dynamic so the user can explicitly specify the option with either on or off option, or pass in no option to use the dynamic default.
-* Shell scripts sometimes want to be explicit even when it's the default
-* Shell aliases can set a flag, then an invocation can add a negation of the flag
-
-If a forward slash(`/`) is contained in your option name already, you can split the parameters using `;`. In Windows `/` is commonly used as the prefix character.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('/debug;/no-debug')
-    def log(debug):
-        click.echo(f"debug={debug}")
-```
-
-```{versionchanged} 6.0
-```
-
-If you want to define an alias for the second option only, then you will need to use leading whitespace to disambiguate the format string.
-
-```{eval-rst}
-.. click:example::
-
-    import sys
-
-    @click.command()
-    @click.option('--shout/--no-shout', ' /-N', default=False)
-    def info(shout):
-        rv = sys.platform
-        if shout:
-            rv = rv.upper() + '!!!!111'
-        click.echo(rv)
-
-.. click:run::
-
-    invoke(info, args=['--help'])
-```
-
-## Flag Value
-
-To have an flag pass a value to the underlying function set `flag_value`. This automatically sets `is_flag=True`. To mark the flag as default, set `default=True`. Setting flag values can be used to create patterns like this:
-
-```{eval-rst}
-.. click:example::
-
-    import sys
-
-    @click.command()
-    @click.option('--upper', 'transformation', flag_value='upper', default=True)
-    @click.option('--lower', 'transformation', flag_value='lower')
-    def info(transformation):
-        click.echo(getattr(sys.platform, transformation)())
-
-.. click:run::
-
-    invoke(info, args=['--help'])
-    invoke(info, args=['--upper'])
-    invoke(info, args=['--lower'])
-    invoke(info)
-```
-
-````{note}
-The `default` value is given to the underlying function as-is. So if you set `default=None`, the value passed to the function is the `None` Python value. Same for any other type.
-
-But there is a special case for flags. If a flag has a `flag_value`, then setting `default=True` is interpreted as *the flag should be activated by default*. So instead of the underlying function receiving the `True` Python value, it will receive the `flag_value`.
-
-Which means, in example above, this option:
-
-```python
-@click.option('--upper', 'transformation', flag_value='upper', default=True)
-```
-
-is equivalent to:
-
-```python
-@click.option('--upper', 'transformation', flag_value='upper', default='upper')
-```
-
-Because the two are equivalent, it is recommended to always use the second form, and set `default` to the actual value you want to pass. And not use the special `True` case. This makes the code more explicit and predictable.
 ````
-
-## Values from Environment Variables
-
-To pass in a value in from a specific environment variable use `envvar`.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--username', envvar='USERNAME')
-    def greet(username):
-       click.echo(f"Hello {username}!")
-
-.. click:run::
-
-    invoke(greet, env={'USERNAME': 'john'})
-```
-
-If a list is passed to `envvar`, the first environment variable found is picked.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--username', envvar=['ALT_USERNAME', 'USERNAME'])
-    def greet(username):
-       click.echo(f"Hello {username}!")
-
-.. click:run::
-
-    invoke(greet, env={'ALT_USERNAME': 'Bill', 'USERNAME': 'john'})
-
-```
-
-Variable names are:
- - [Case-insensitive on Windows but not on other platforms](https://github.com/python/cpython/blob/aa9eb5f757ceff461e6e996f12c89e5d9b583b01/Lib/os.py#L777-L789).
- - Not stripped of whitespaces and should match the exact name provided to the `envvar` argument.
-
-For flag options, there is two concepts to consider: the activation of the flag driven by the environment variable, and the value of the flag if it is activated.
-
-The environment variable need to be interpreted, because values read from them are always strings. We need to transform these strings into boolean values that will determine if the flag is activated or not.
-
-Here are the rules used to parse environment variable values for flag options:
-   - `true`, `1`, `yes`, `on`, `t`, `y` are interpreted as activating the flag
-   - `false`, `0`, `no`, `off`, `f`, `n` are interpreted as deactivating the flag
-   - The presence of the environment variable without value is interpreted as deactivating the flag
-   - Empty strings are interpreted as deactivating the flag
-   - Values are case-insensitive, so the `True`, `TRUE`, `tRuE` strings are all activating the flag
-   - Values are stripped of leading and trailing whitespaces before being interpreted, so the `" True "` string is transformed to `"true"` and so activates the flag
-   - If the flag option has a `flag_value` argument, passing that value in the environment variable will activate the flag, in addition to all the cases described above
-   - Any other value is interpreted as deactivating the flag
-
-```{caution}
-For boolean flags with a pair of values, the only recognized environment variable is the one provided to the `envvar` argument.
-
-So an option defined as `--flag\--no-flag`, with a `envvar="FLAG"` parameter, there is no magical `NO_FLAG=<anything>` variable that is recognized. Only the `FLAG=<anything>` environment variable is recognized.
-```
-
-Once the status of the flag has been determine to be activated or not, the `flag_value` is used as the value of the flag if it is activated. If the flag is not activated, the value of the flag is set to `None` by default.
-
-## Multiple Options from Environment Values
-
-As options can accept multiple values, pulling in such values from
-environment variables (which are strings) is a bit more complex. The way
-Click solves this is by leaving it up to the type to customize this
-behavior. For both `multiple` and `nargs` with values other than
-`1`, Click will invoke the {meth}`ParamType.split_envvar_value` method to
-perform the splitting.
-
-The default implementation for all types is to split on whitespace. The
-exceptions to this rule are the {class}`File` and {class}`Path` types
-which both split according to the operating system's path splitting rules.
-On Unix systems like Linux and OS X, the splitting happens on
-every colon (`:`), and for Windows, splitting on every semicolon (`;`).
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('paths', '--path', envvar='PATHS', multiple=True,
-                  type=click.Path())
-    def perform(paths):
-        for path in paths:
-            click.echo(path)
-
-    if __name__ == '__main__':
-        perform()
-
-.. click:run::
-
-    import os
-    invoke(perform, env={"PATHS": f"./foo/bar{os.path.pathsep}./test"})
-```
-
-## Other Prefix Characters
-
-Click can deal with prefix characters besides `-` for options. Click can use
-`/`, `+` as well as others. Note that alternative prefix characters are generally used very sparingly if at all within POSIX.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('+w/-w')
-    def chmod(w):
-        click.echo(f"writable={w}")
-
-.. click:run::
-
-    invoke(chmod, args=['+w'])
-    invoke(chmod, args=['-w'])
-```
-
-There are special considerations for using `/` as prefix character, see {ref}`option-boolean-flag` for more.
-
-(optional-value)=
-
-## Optional Value
-
-Providing the value to an option can be made optional, in which case
-providing only the option's flag without a value will either show a
-prompt or use its `flag_value`.
-
-Setting `is_flag=False, flag_value=value` tells Click that the option
-can still be passed a value, but if only the flag is given, the
-value will be `flag_value`.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option("--name", is_flag=False, flag_value="Flag", default="Default")
-    def hello(name):
-        click.echo(f"Hello, {name}!")
-
-.. click:run::
-
-    invoke(hello, args=[])
-    invoke(hello, args=["--name", "Value"])
-    invoke(hello, args=["--name"])
-```
-
-```
----
-
-## docs/parameter-types.md
-
-```markdown
-(parameter-types)=
-
-# Parameter Types
-
-```{currentmodule} click
-```
-
-When the parameter type is set using `type`, Click will leverage the type to make your life easier, for example adding
-data to your help pages. Most examples are done with options, but types are available to options and arguments.
-
-```{contents}
----
-depth: 2
-local: true
----
-```
-
-## Built-in Types Examples
-
-(choice-opts)=
-
-### Choice
-
-Sometimes, you want to have a parameter be a choice of a list of values. In that case you can use {class}`Choice` type.
-It can be instantiated with a list of valid values. The originally passed choice will be returned, not the str passed on
-the command line. Token normalization functions and `case_sensitive=False` can cause the two to be different but still
-match. {meth}`Choice.normalize_choice` for more info.
-
-
-Example:
-
-```{eval-rst}
-.. click:example::
-
-    import enum
-
-    class HashType(enum.Enum):
-        MD5 = enum.auto()
-        SHA1 = enum.auto()
-
-    @click.command()
-    @click.option('--hash-type',
-                  type=click.Choice(HashType, case_sensitive=False))
-    def digest(hash_type: HashType):
-        click.echo(hash_type)
-
-What it looks like:
-
-.. click:run::
-
-    invoke(digest, args=['--hash-type=MD5'])
-    println()
-    invoke(digest, args=['--hash-type=md5'])
-    println()
-    invoke(digest, args=['--hash-type=foo'])
-    println()
-    invoke(digest, args=['--help'])
-```
-
-Any iterable may be passed to {class}`Choice`. If an `Enum` is passed, the names of the enum members will be used as
-valid choices.
-
-Choices work with options that have `multiple=True`. If a `default` value is given with `multiple=True`, it should be a
-list or tuple of valid choices.
-
-Choices should be unique after normalization, see {meth}`Choice.normalize_choice` for more info.
-
-```{versionchanged} 7.1
-The resulting value from an option will always be one of the originally passed choices
-regardless of `case_sensitive`.
-```
-
-(ranges)=
-
-### Int and Float Ranges
-
-The {class}`IntRange` type extends the {data}`INT` type to ensure the value is contained in the given range. The
-{class}`FloatRange` type does the same for {data}`FLOAT`.
-
-If `min` or `max` is omitted, that side is *unbounded*. Any value in that direction is accepted. By default, both bounds
-are *closed*, which means the boundary value is included in the accepted range. `min_open` and `max_open` can be used to
-exclude that boundary from the range.
-
-If `clamp` mode is enabled, a value that is outside the range is set to the boundary instead of failing. For example,
-the range `0, 5` would return `5` for the value `10`, or `0` for the value `-1`. When using {class}`FloatRange`, `clamp`
-can only be enabled if both bounds are *closed* (the default).
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option("--count", type=click.IntRange(0, 20, clamp=True))
-    @click.option("--digit", type=click.IntRange(0, 9))
-    def repeat(count, digit):
-        click.echo(str(digit) * count)
-
-.. click:run::
-
-    invoke(repeat, args=['--count=100', '--digit=5'])
-    invoke(repeat, args=['--count=6', '--digit=12'])
-```
-
-## Built-in Types Listing
-
-The supported parameter {ref}`click-api-types` are
-
-- `str` / {data}`click.STRING`: The default parameter type which indicates unicode strings.
-
-- `int` / {data}`click.INT`: A parameter that only accepts integers.
-
-- `float` / {data}`click.FLOAT`: A parameter that only accepts floating point values.
-
-- `bool` / {data}`click.BOOL`: A parameter that accepts boolean values. This is automatically used for boolean flags.
-  The string values "1", "true", "t", "yes", "y", and "on" convert to `True`. "0", "false", "f", "no", "n", and "off"
-  convert to `False`.
-
-- {data}`click.UUID`: A parameter that accepts UUID values. This is not automatically guessed but represented as
-  {class}`uuid.UUID`.
-
-```{eval-rst}
-*   .. autoclass:: Choice
-       :noindex:
-```
-
-```{eval-rst}
-*   .. autoclass:: DateTime
-       :noindex:
-```
-
-```{eval-rst}
-*   .. autoclass:: File
-       :noindex:
-```
-
-```{eval-rst}
-*   .. autoclass:: FloatRange
-       :noindex:
-```
-
-```{eval-rst}
-*   .. autoclass:: IntRange
-       :noindex:
-```
-
-```{eval-rst}
-*   .. autoclass:: Path
-       :noindex:
-```
-
-## How to Implement Custom Types
-
-To implement a custom type, you need to subclass the {class}`ParamType` class. For simple cases, passing a Python
-function that fails with a `ValueError` is also supported, though discouraged. Override the {meth}`~ParamType.convert`
-method to convert the value from a string to the correct type.
-
-The following code implements an integer type that accepts hex and octal numbers in addition to normal integers, and
-converts them into regular integers.
-
-```python
-import click
-
-class BasedIntParamType(click.ParamType):
-    name = "integer"
-
-    def convert(self, value, param, ctx):
-        if isinstance(value, int):
-            return value
-
-        try:
-            if value[:2].lower() == "0x":
-                return int(value[2:], 16)
-            elif value[:1] == "0":
-                return int(value, 8)
-            return int(value, 10)
-        except ValueError:
-            self.fail(f"{value!r} is not a valid integer", param, ctx)
-
-BASED_INT = BasedIntParamType()
-```
-
-The {attr}`~ParamType.name` attribute is optional and is used for documentation. Call {meth}`~ParamType.fail` if
-conversion fails. The `param` and `ctx` arguments may be `None` in some cases such as prompts.
-
-Values from user input or the command line will be strings, but default values and Python arguments may already be the
-correct type. The custom type should check at the top if the value is already valid and pass it through to support those
-cases.
-
-```
----
-
-## docs/parameters.md
-
-```markdown
-(parameters)=
-
-# Parameters
-
-```{currentmodule} click
-```
-
-Click supports only two principle types of parameters for scripts (by design): options and arguments.
-
-## Options
-
-- Are optional.
-- Recommended to use for everything except subcommands, urls, or files.
-- Can take a fixed number of arguments. The default is 1. They may be specified multiple times using {ref}`multiple-options`.
-- Are fully documented by the help page.
-- Have automatic prompting for missing input.
-- Can act as flags (boolean or otherwise).
-- Can be pulled from environment variables.
-
-## Arguments
-
-- Are optional with in reason, but not entirely so.
-- Recommended to use for subcommands, urls, or files.
-- Can take an arbitrary number of arguments.
-- Are not fully documented by the help page since they may be too specific to be automatically documented. For more see {ref}`documenting-arguments`.
-- Can be pulled from environment variables but only explicitly named ones. For more see {ref}`environment-variables`.
-
-On each principle type you can specify {ref}`parameter-types`. Specifying these types helps Click add details to your help pages and help with the handling of those types.
-
-(parameter-names)=
-
-## Parameter Names
-
-Parameters (options and arguments) have a name that will be used as
-the Python argument name when calling the decorated function with
-values.
-
-In the example, the argument's name is `filename`. The name must match the python arg name. To provide a different name for use in help text, see {ref}`doc-meta-variables`.
-The option's names are `-t` and `--times`. More names are available for options and are covered in {ref}`options`.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.argument('filename')
-    @click.option('-t', '--times', type=int)
-    def multi_echo(filename, times):
-        """Print value filename multiple times."""
-        for x in range(times):
-            click.echo(filename)
-
-.. click:run::
-
-    invoke(multi_echo, ['--times=3', 'index.txt'], prog_name='multi_echo')
-```
-
-```
----
-
-## docs/prompts.md
-
-```markdown
-# User Input Prompts
-
-```{currentmodule} click
-```
-
-Click supports prompts in two different places. The first is automated prompts when the parameter handling happens, and
-the second is to ask for prompts at a later point independently.
-
-This can be accomplished with the {func}`prompt` function, which asks for valid input according to a type, or the
-{func}`confirm` function, which asks for confirmation (yes/no).
-
-```{contents}
----
-depth: 2
-local: true
----
-```
-
-(option-prompting)=
-
-## Option Prompts
-
-Option prompts are integrated into the option interface. Internally, it automatically calls either {func}`prompt` or
-{func}`confirm` as necessary.
-
-In some cases, you want parameters that can be provided from the command line, but if not provided, ask for user input
-instead. This can be implemented with Click by defining a prompt string.
-
-Example:
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--name', prompt=True)
-    def hello(name):
-        click.echo(f"Hello {name}!")
-
-And what it looks like:
-
-.. click:run::
-
-    invoke(hello, args=['--name=John'])
-    invoke(hello, input=['John'])
-```
-
-If you are not happy with the default prompt string, you can ask for
-a different one:
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--name', prompt='Your name please')
-    def hello(name):
-        click.echo(f"Hello {name}!")
-
-What it looks like:
-
-.. click:run::
-
-    invoke(hello, input=['John'])
-```
-
-It is advised that prompt not be used in conjunction with the multiple flag set to True. Instead, prompt in the function
-interactively.
-
-By default, the user will be prompted for an input if one was not passed through the command line. To turn this behavior
-off, see {ref}`optional-value`.
-
-## Input Prompts
-
-To manually ask for user input, you can use the {func}`prompt` function. By default, it accepts any Unicode string, but
-you can ask for any other type. For instance, you can ask for a valid integer:
-
-```python
-value = click.prompt('Please enter a valid integer', type=int)
-```
-
-Additionally, the type will be determined automatically if a default value is provided. For instance, the following will
-only accept floats:
-
-```python
-value = click.prompt('Please enter a number', default=42.0)
-```
-
-## Optional Prompts
-
-If the option has `prompt` enabled, then setting `prompt_required=False` tells Click to only show the prompt if the
-option's flag is given, instead of if the option is not provided at all.
-
-```{eval-rst}
-.. click:example::
-
-    @click.command()
-    @click.option('--name', prompt=True, prompt_required=False, default="Default")
-    def hello(name):
-        click.echo(f"Hello {name}!")
-
-.. click:run::
-
-    invoke(hello)
-    invoke(hello, args=["--name", "Value"])
-    invoke(hello, args=["--name"], input="Prompt")
-```
-
-If `required=True`, then the option will still prompt if it is not given, but it will also prompt if only the flag is
-given.
-
-## Confirmation Prompts
-
-To ask if a user wants to continue with an action, the {func}`confirm` function comes in handy. By default, it returns
-the result of the prompt as a boolean value:
-
-```python
-if click.confirm('Do you want to continue?'):
-    click.echo('Well done!')
-```
-
-There is also the option to make the function automatically abort the execution of the program if it does not return
-`True`:
-
-```python
-click.confirm('Do you want to continue?', abort=True)
-```
-
-## Dynamic Defaults for Prompts
-
-The `auto_envvar_prefix` and `default_map` options for the context allow the program to read option values from the
-environment or a configuration file. However, this overrides the prompting mechanism, so that the user does not get the
-option to change the value interactively.
-
-If you want to let the user configure the default value, but still be prompted if the option isn't specified on the
-command line, you can do so by supplying a callable as the default value. For example, to get a default from the
-environment:
-
-```python
-import os
-
-@click.command()
-@click.option(
-    "--username", prompt=True,
-    default=lambda: os.environ.get("USER", "")
-)
-def hello(username):
-    click.echo(f"Hello, {username}!")
-```
-
-To describe what the default value will be, set it in ``show_default``.
-
-```{eval-rst}
-.. click:example::
-
-    import os
-
-    @click.command()
-    @click.option(
-        "--username", prompt=True,
-        default=lambda: os.environ.get("USER", ""),
-        show_default="current user"
-    )
-    def hello(username):
-        click.echo(f"Hello, {username}!")
-
-.. click:run::
-
-   invoke(hello, args=["--help"])
-```
-
-```

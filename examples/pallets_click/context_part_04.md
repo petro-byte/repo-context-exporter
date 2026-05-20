@@ -1,4 +1,4 @@
-# Repository Context Part 4/6
+# Repository Context Part 4/7
 
 Generated for LLM prompt context.
 
@@ -50,12 +50,13 @@ def shell_complete(
 
     comp = comp_cls(cli, ctx_args, prog_name, complete_var)
 
+    # Write bytes, otherwise Windows text stdout translates LF to CRLF and breaks.
     if instruction == "source":
-        echo(comp.source())
+        echo(comp.source().encode(), nl=False)
         return 0
 
     if instruction == "complete":
-        echo(comp.complete())
+        echo(comp.complete().encode())
         return 0
 
     return 1
@@ -187,14 +188,18 @@ function %(complete_func)s;
 COMP_CWORD=(commandline -t) %(prog_name)s);
 
     for completion in $response;
-        set -l metadata (string split "," $completion);
+        set -l metadata (string split \n $completion);
 
         if test $metadata[1] = "dir";
             __fish_complete_directories $metadata[2];
         else if test $metadata[1] = "file";
             __fish_complete_path $metadata[2];
         else if test $metadata[1] = "plain";
-            echo $metadata[2];
+            if test $metadata[3] != "_";
+                echo $metadata[2]\t$metadata[3];
+            else;
+                echo $metadata[2];
+            end;
         end;
     end;
 end;
@@ -424,10 +429,20 @@ class FishComplete(ShellComplete):
         return args, incomplete
 
     def format_completion(self, item: CompletionItem) -> str:
-        if item.help:
-            return f"{item.type},{item.value}\t{item.help}"
-
-        return f"{item.type},{item.value}"
+        """
+        .. versionchanged:: 8.4
+            Escape newlines in value and help to fix completion errors with
+            multi-line help strings.
+        """
+        # The fish completion script splits each response line on literal
+        # newlines, so any newline in the value or help would corrupt the
+        # frame. Replace them with the two-character escape "\n" so the text
+        # round-trips through fish without breaking the format. The "_"
+        # sentinel for missing help mirrors :class:`ZshComplete`.
+        help_ = item.help or "_"
+        value = item.value.replace("\n", r"\n")
+        help_escaped = help_.replace("\n", r"\n")
+        return f"{item.type}\n{value}\n{help_escaped}"
 
 
 ShellCompleteType = t.TypeVar("ShellCompleteType", bound="type[ShellComplete]")
@@ -518,8 +533,6 @@ def _is_incomplete_argument(ctx: Context, param: Parameter) -> bool:
     if not isinstance(param, Argument):
         return False
 
-    assert param.name is not None
-    # Will be None if expose_value is False.
     value = ctx.params.get(param.name)
     return (
         param.nargs == -1
@@ -685,13 +698,16 @@ import collections.abc as cabc
 import inspect
 import io
 import itertools
+import re
 import sys
 import typing as t
 from contextlib import AbstractContextManager
+from contextlib import redirect_stdout
 from gettext import gettext as _
 
 from ._compat import isatty
 from ._compat import strip_ansi
+from ._compat import WIN
 from .exceptions import Abort
 from .exceptions import UsageError
 from .globals import resolve_color_default
@@ -732,23 +748,66 @@ _ansi_colors = {
 _ansi_reset_all = "\033[0m"
 
 
+_HIDDEN_INPUT_MASK = "'***'"
+
+
+def _mask_hidden_input(message: str, value: str) -> str:
+    """Replace occurrences of ``value`` in ``message`` with a fixed mask.
+
+    Both ``repr(value)`` (the form built-in :class:`ParamType` errors use
+    via ``{value!r}``) and the raw value are masked. The raw-value pass
+    uses word-boundary lookarounds so a substring like ``"1"`` does not
+    match inside ``"10"``, and ``"ent"`` does not match inside
+    ``"Authentication"``. The empty string is skipped to avoid matching
+    at every boundary.
+    """
+    message = message.replace(repr(value), _HIDDEN_INPUT_MASK)
+    if value:
+        message = re.sub(
+            rf"(?<!\w){re.escape(value)}(?!\w)", _HIDDEN_INPUT_MASK, message
+        )
+    return message
+
+
 def hidden_prompt_func(prompt: str) -> str:
     import getpass
 
     return getpass.getpass(prompt)
 
 
+def _readline_prompt(func: t.Callable[[str], str], text: str, err: bool) -> str:
+    """Call a prompt function, passing the full prompt on non-Windows so
+    readline can handle line editing and cursor positioning correctly.
+
+    On Windows the prompt is written separately via :func:`echo` for
+    colorama support, with only the last character passed to *func*.
+    """
+    if WIN:
+        # Write the prompt separately so that we get nice coloring
+        # through colorama on Windows.
+        echo(text[:-1], nl=False, err=err)
+        # Echo the last character to stdout to work around an issue
+        # where readline causes backspace to clear the whole line.
+        return func(text[-1:])
+    if err:
+        with redirect_stdout(sys.stderr):
+            return func(text)
+    return func(text)
+
+
 def _build_prompt(
     text: str,
     suffix: str,
-    show_default: bool = False,
+    show_default: bool | str = False,
     default: t.Any | None = None,
     show_choices: bool = True,
-    type: ParamType | None = None,
+    type: ParamType[t.Any] | None = None,
 ) -> str:
     prompt = text
     if type is not None and show_choices and isinstance(type, Choice):
         prompt += f" ({', '.join(map(str, type.choices))})"
+    if isinstance(show_default, str):
+        default = f"({show_default})"
     if default is not None and show_default:
         prompt = f"{prompt} [{_format_default(default)}]"
     return f"{prompt}{suffix}"
@@ -766,10 +825,10 @@ def prompt(
     default: t.Any | None = None,
     hide_input: bool = False,
     confirmation_prompt: bool | str = False,
-    type: ParamType | t.Any | None = None,
+    type: ParamType[t.Any] | t.Any | None = None,
     value_proc: t.Callable[[str], t.Any] | None = None,
     prompt_suffix: str = ": ",
-    show_default: bool = True,
+    show_default: bool | str = True,
     err: bool = False,
     show_choices: bool = True,
 ) -> t.Any:
@@ -793,12 +852,18 @@ def prompt(
                        convert a value.
     :param prompt_suffix: a suffix that should be added to the prompt.
     :param show_default: shows or hides the default value in the prompt.
+                         If this value is a string, it shows that string
+                         in parentheses instead of the actual value.
     :param err: if set to true the file defaults to ``stderr`` instead of
                 ``stdout``, the same as with echo.
     :param show_choices: Show or hide choices if the passed type is a Choice.
                          For example if type is a Choice of either day or week,
                          show_choices is true and text is "Group by" then the
                          prompt will be "Group by (day, week): ".
+
+    .. versionchanged:: 8.3.3
+        ``show_default`` can be a string to show a custom value instead
+        of the actual default, matching the help text behavior.
 
     .. versionchanged:: 8.3.1
         A space is no longer appended to the prompt.
@@ -820,12 +885,7 @@ def prompt(
     def prompt_func(text: str) -> str:
         f = hidden_prompt_func if hide_input else visible_prompt_func
         try:
-            # Write the prompt separately so that we get nice
-            # coloring through colorama on Windows
-            echo(text[:-1], nl=False, err=err)
-            # Echo the last character to stdout to work around an issue where
-            # readline causes backspace to clear the whole line.
-            return f(text[-1:])
+            return _readline_prompt(f, text, err)
         except (KeyboardInterrupt, EOFError):
             # getpass doesn't print a newline if the user aborts input with ^C.
             # Allegedly this behavior is inherited from getpass(3).
@@ -858,10 +918,8 @@ def prompt(
         try:
             result = value_proc(value)
         except UsageError as e:
-            if hide_input:
-                echo(_("Error: The value you entered was invalid."), err=err)
-            else:
-                echo(_("Error: {e.message}").format(e=e), err=err)
+            message = _mask_hidden_input(e.message, value) if hide_input else e.message
+            echo(_("Error: {message}").format(message=message), err=err)
             continue
         if not confirmation_prompt:
             return result
@@ -916,12 +974,7 @@ def confirm(
 
     while True:
         try:
-            # Write the prompt separately so that we get nice
-            # coloring through colorama on Windows
-            echo(prompt[:-1], nl=False, err=err)
-            # Echo the last character to stdout to work around an issue where
-            # readline causes backspace to clear the whole line.
-            value = visible_prompt_func(prompt[-1:]).lower().strip()
+            value = _readline_prompt(visible_prompt_func, prompt, err).lower().strip()
         except (KeyboardInterrupt, EOFError):
             raise Abort() from None
         if value in ("y", "yes"):
@@ -939,6 +992,25 @@ def confirm(
     return rv
 
 
+def get_pager_file(
+    color: bool | None = None,
+) -> t.ContextManager[t.TextIO]:
+    """Context manager.
+
+    Yields a writable file-like object which can be used as an output pager.
+
+    .. versionadded:: 8.2
+
+    :param color: controls if the pager supports ANSI colors or not.  The
+                  default is autodetection.
+    """
+    from ._termui_impl import get_pager_file
+
+    color = resolve_color_default(color)
+
+    return get_pager_file(color=color)
+
+
 def echo_via_pager(
     text_or_generator: cabc.Iterable[str] | t.Callable[[], cabc.Iterable[str]] | str,
     color: bool | None = None,
@@ -954,7 +1026,6 @@ def echo_via_pager(
     :param color: controls if the pager supports ANSI colors or not.  The
                   default is autodetection.
     """
-    color = resolve_color_default(color)
 
     if inspect.isgeneratorfunction(text_or_generator):
         i = t.cast("t.Callable[[], cabc.Iterable[str]]", text_or_generator)()
@@ -966,9 +1037,9 @@ def echo_via_pager(
     # convert every element of i to a text type if necessary
     text_generator = (el if isinstance(el, str) else str(el) for el in i)
 
-    from ._termui_impl import pager
-
-    return pager(itertools.chain(text_generator, "\n"), color)
+    with get_pager_file(color=color) as pager:
+        for text in itertools.chain(text_generator, "\n"):
+            pager.write(text)
 
 
 @t.overload
@@ -1295,13 +1366,13 @@ def style(
         try:
             bits.append(f"\033[{_interpret_color(fg)}m")
         except KeyError:
-            raise TypeError(f"Unknown color {fg!r}") from None
+            raise TypeError(_("Unknown color {colour!r}").format(colour=fg)) from None
 
     if bg:
         try:
             bits.append(f"\033[{_interpret_color(bg, 10)}m")
         except KeyError:
-            raise TypeError(f"Unknown color {bg!r}") from None
+            raise TypeError(_("Unknown color {colour!r}").format(colour=bg)) from None
 
     if bold is not None:
         bits.append(f"\033[{1 if bold else 22}m")
@@ -1575,6 +1646,7 @@ import collections.abc as cabc
 import contextlib
 import io
 import os
+import pdb
 import shlex
 import sys
 import tempfile
@@ -1591,6 +1663,8 @@ if t.TYPE_CHECKING:
     from _typeshed import ReadableBuffer
 
     from .core import Command
+
+CaptureMode = t.Literal["sys", "fd"]
 
 
 class EchoingStdin:
@@ -1637,6 +1711,39 @@ def _pause_echo(stream: EchoingStdin | None) -> cabc.Iterator[None]:
         stream._paused = False
 
 
+class _FDCapture:
+    """Redirect a file descriptor to a temporary file for capture.
+
+    Saves the current target of *targetfd* via :func:`os.dup`, then
+    redirects it to a temporary file via :func:`os.dup2`. On
+    :meth:`stop`, restores the original ``fd`` and returns the captured
+    bytes. Inspired by Pytest's ``FDCapture``.
+
+    .. versionadded:: 8.4.0
+    """
+
+    def __init__(self, targetfd: int) -> None:
+        self._targetfd = targetfd
+        self.saved_fd: int = -1
+        self._tmpfile: t.BinaryIO | None = None
+
+    def start(self) -> None:
+        self.saved_fd = os.dup(self._targetfd)
+        self._tmpfile = tempfile.TemporaryFile(buffering=0)
+        os.dup2(self._tmpfile.fileno(), self._targetfd)
+
+    def stop(self) -> bytes:
+        assert self._tmpfile is not None, "_FDCapture.start() was not called"
+        os.dup2(self.saved_fd, self._targetfd)
+        os.close(self.saved_fd)
+        self.saved_fd = -1
+        self._tmpfile.seek(0)
+        data = self._tmpfile.read()
+        self._tmpfile.close()
+        self._tmpfile = None
+        return data
+
+
 class BytesIOCopy(io.BytesIO):
     """Patch ``io.BytesIO`` to let the written stream be copied to another.
 
@@ -1669,26 +1776,48 @@ class StreamMixer:
         self.stdout: io.BytesIO = BytesIOCopy(copy_to=self.output)
         self.stderr: io.BytesIO = BytesIOCopy(copy_to=self.output)
 
-    def __del__(self) -> None:
-        """
-        Guarantee that embedded file-like objects are closed in a
-        predictable order, protecting against races between
-        self.output being closed and other streams being flushed on close
-
-        .. versionadded:: 8.2.2
-        """
-        self.stderr.close()
-        self.stdout.close()
-        self.output.close()
-
 
 class _NamedTextIOWrapper(io.TextIOWrapper):
+    """A :class:`~io.TextIOWrapper` with custom ``name`` and ``mode``
+    that does not close its underlying buffer.
+
+    When ``CliRunner`` runs in ``fd`` mode, ``_original_fd`` is patched to
+    point at the saved (pre-redirection) ``fd``, so C-level consumers that call
+    :meth:`fileno` (like ``faulthandler`` or ``subprocess``) keep working. In
+    the default ``sys`` mode ``_original_fd`` stays at ``-1`` and
+    :meth:`fileno` raises :exc:`io.UnsupportedOperation`, matching the
+    pre-``8.3.3`` behavior.
+    """
+
     def __init__(
-        self, buffer: t.BinaryIO, name: str, mode: str, **kwargs: t.Any
+        self,
+        buffer: t.BinaryIO,
+        name: str,
+        mode: str,
+        **kwargs: t.Any,
     ) -> None:
         super().__init__(buffer, **kwargs)
         self._name = name
         self._mode = mode
+        self._original_fd: int = -1
+
+    def close(self) -> None:
+        """The buffer this object contains belongs to some other object,
+        so prevent the default ``__del__`` implementation from closing
+        that buffer.
+
+        .. versionadded:: 8.3.2
+        """
+
+    def fileno(self) -> int:
+        """Return the file descriptor of the saved original stream when
+        ``CliRunner`` runs in ``fd`` mode. Otherwise delegate to
+        :class:`~io.TextIOWrapper`, which raises
+        :exc:`io.UnsupportedOperation` for a ``BytesIO``-backed buffer.
+        """
+        if self._original_fd >= 0:
+            return self._original_fd
+        return super().fileno()
 
     @property
     def name(self) -> str:
@@ -1811,6 +1940,21 @@ class CliRunner:
                        will automatically echo the input.
     :param catch_exceptions: Whether to catch any exceptions other than
                              ``SystemExit`` when running :meth:`~CliRunner.invoke`.
+    :param capture: Selects the output capture strategy. ``sys`` (default)
+        captures Python-level writes only and leaves
+        :meth:`sys.stdout.fileno` raising :exc:`io.UnsupportedOperation`, so
+        user code that calls :func:`os.dup2` on ``sys.stdout.fileno()`` cannot
+        clobber the host runner's stdout. ``fd`` redirects file descriptors
+        ``1`` and ``2`` via :func:`os.dup2` to a temporary file, also catching
+        output from stale stream references, C extensions, and subprocesses.
+        ``fd`` is not supported on Windows.
+
+    .. versionchanged:: 8.4.0
+        Added the ``capture`` parameter. The default ``sys`` mode no longer
+        exposes the original fd through :meth:`fileno`, reverting the change
+        introduced in ``8.3.3`` that broke Pytest's ``fd``-level capture
+        teardown. Use ``capture="fd"`` to restore that behavior with proper
+        isolation. :issue:`3384`
 
     .. versionchanged:: 8.2
         Added the ``catch_exceptions`` parameter.
@@ -1825,11 +1969,21 @@ class CliRunner:
         env: cabc.Mapping[str, str | None] | None = None,
         echo_stdin: bool = False,
         catch_exceptions: bool = True,
+        capture: CaptureMode = "sys",
     ) -> None:
+        if capture not in {"sys", "fd"}:
+            raise ValueError(
+                f"capture={capture!r} is not valid. Choose from 'sys' or 'fd'."
+            )
+        if capture == "fd" and sys.platform == "win32":
+            raise ValueError(
+                f"capture={capture!r} is not supported on Windows. Use 'sys'."
+            )
         self.charset = charset
         self.env: cabc.Mapping[str, str | None] = env or {}
         self.echo_stdin = echo_stdin
         self.catch_exceptions = catch_exceptions
+        self.capture: CaptureMode = capture
 
     def get_default_prog_name(self, cli: Command) -> str:
         """Given a command object it will return the default program name
@@ -1909,7 +2063,10 @@ class CliRunner:
             text_input._CHUNK_SIZE = 1  # type: ignore
 
         sys.stdout = _NamedTextIOWrapper(
-            stream_mixer.stdout, encoding=self.charset, name="<stdout>", mode="w"
+            stream_mixer.stdout,
+            encoding=self.charset,
+            name="<stdout>",
+            mode="w",
         )
 
         sys.stderr = _NamedTextIOWrapper(
@@ -1964,11 +2121,51 @@ class CliRunner:
         old__getchar_func = termui._getchar
         old_should_strip_ansi = utils.should_strip_ansi  # type: ignore
         old__compat_should_strip_ansi = _compat.should_strip_ansi
+        old_pdb_init = pdb.Pdb.__init__
         termui.visible_prompt_func = visible_input
         termui.hidden_prompt_func = hidden_input
         termui._getchar = _getchar
         utils.should_strip_ansi = should_strip_ansi  # type: ignore
         _compat.should_strip_ansi = should_strip_ansi
+
+        def _patched_pdb_init(
+            self: pdb.Pdb,
+            completekey: str = "tab",
+            stdin: t.IO[str] | None = None,
+            stdout: t.IO[str] | None = None,
+            **kwargs: t.Any,
+        ) -> None:
+            """Default ``pdb.Pdb`` to real terminal streams during
+            ``CliRunner`` isolation.
+
+            Without this patch, ``pdb.Pdb.__init__`` inherits from
+            ``cmd.Cmd`` which falls back to ``sys.stdin``/``sys.stdout``
+            when no explicit streams are provided. During isolation
+            those are ``BytesIO``-backed wrappers, so the debugger
+            reads from an empty buffer and writes to captured output,
+            making interactive debugging impossible.
+
+            By defaulting to ``sys.__stdin__``/``sys.__stdout__`` (the
+            original terminal streams Python preserves regardless of
+            redirection), debuggers can interact with the user while
+            ``click.echo`` output is still captured normally.
+
+            This covers ``pdb.set_trace()``, ``breakpoint()``,
+            ``pdb.post_mortem()``, and debuggers that subclass
+            ``pdb.Pdb`` (ipdb, pdbpp). Explicit ``stdin``/``stdout``
+            arguments are honored and not overridden. Debuggers that
+            do not subclass ``pdb.Pdb`` (pudb, debugpy) are not
+            covered.
+            """
+            if stdin is None:
+                stdin = sys.__stdin__
+            if stdout is None:
+                stdout = sys.__stdout__
+            old_pdb_init(
+                self, completekey=completekey, stdin=stdin, stdout=stdout, **kwargs
+            )
+
+        pdb.Pdb.__init__ = _patched_pdb_init  # type: ignore[assignment]
 
         old_env = {}
         try:
@@ -2000,6 +2197,7 @@ class CliRunner:
             utils.should_strip_ansi = old_should_strip_ansi  # type: ignore
             _compat.should_strip_ansi = old__compat_should_strip_ansi
             formatting.FORCED_WIDTH = old_forced_width
+            pdb.Pdb.__init__ = old_pdb_init  # type: ignore[method-assign]
 
     def invoke(
         self,
@@ -2058,7 +2256,27 @@ class CliRunner:
         if catch_exceptions is None:
             catch_exceptions = self.catch_exceptions
 
+        # Set up fd capture before isolation replaces sys.stdout and sys.stderr.
+        cap_out: _FDCapture | None = None
+        cap_err: _FDCapture | None = None
+
+        if self.capture == "fd":
+            cap_out = _FDCapture(1)
+            cap_err = _FDCapture(2)
+            try:
+                cap_out.start()
+                cap_err.start()
+            except OSError:
+                cap_out = cap_err = None
+
         with self.isolation(input=input, env=env, color=color) as outstreams:
+            # Point the captured streams' fileno() at the saved (original)
+            # fd so that C-level consumers like faulthandler keep working
+            # while fd 1/2 are redirected to the capture tmpfile.
+            if cap_out is not None and cap_err is not None:
+                sys.stdout._original_fd = cap_out.saved_fd  # type: ignore[union-attr]
+                sys.stderr._original_fd = cap_err.saved_fd  # type: ignore[union-attr]
+
             return_value = None
             exception: BaseException | None = None
             exit_code = 0
@@ -2099,6 +2317,18 @@ class CliRunner:
             finally:
                 sys.stdout.flush()
                 sys.stderr.flush()
+
+                # Stop fd capture and merge the captured bytes into
+                # the stdout/stderr BytesIO streams. BytesIOCopy mirrors
+                # those writes into outstreams[2] automatically.
+                if cap_out is not None and cap_err is not None:
+                    fd_out = cap_out.stop()
+                    fd_err = cap_err.stop()
+                    if fd_out:
+                        outstreams[0].write(fd_out)
+                    if fd_err:
+                        outstreams[1].write(fd_err)
+
                 stdout = outstreams[0].getvalue()
                 stderr = outstreams[1].getvalue()
                 output = outstreams[2].getvalue()
@@ -2155,12 +2385,14 @@ class CliRunner:
 ```python
 from __future__ import annotations
 
+import abc
 import collections.abc as cabc
 import enum
 import os
 import stat
 import sys
 import typing as t
+import uuid
 from datetime import datetime
 from gettext import gettext as _
 from gettext import ngettext
@@ -2182,7 +2414,12 @@ if t.TYPE_CHECKING:
 ParamTypeValue = t.TypeVar("ParamTypeValue")
 
 
-class ParamType:
+class ParamTypeInfoDict(t.TypedDict):
+    param_type: str
+    name: str
+
+
+class ParamType(t.Generic[ParamTypeValue], abc.ABC):
     """Represents the type of a parameter. Validates and converts values
     from the command line or Python into the correct type.
 
@@ -2214,7 +2451,7 @@ class ParamType:
     #: Windows).
     envvar_list_splitter: t.ClassVar[str | None] = None
 
-    def to_info_dict(self) -> dict[str, t.Any]:
+    def to_info_dict(self) -> ParamTypeInfoDict:
         """Gather information that could be useful for a tool generating
         user-facing documentation.
 
@@ -2240,9 +2477,10 @@ class ParamType:
         value: t.Any,
         param: Parameter | None = None,
         ctx: Context | None = None,
-    ) -> t.Any:
+    ) -> ParamTypeValue | None:
         if value is not None:
             return self.convert(value, param, ctx)
+        return None
 
     def get_metavar(self, param: Parameter, ctx: Context) -> str | None:
         """Returns the metavar default for this param if it provides one."""
@@ -2256,7 +2494,7 @@ class ParamType:
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> ParamTypeValue:
         """Convert the value to the correct type. This is not called if
         the value is ``None`` (the missing value).
 
@@ -2276,7 +2514,9 @@ class ParamType:
         :param ctx: The current context that arrived at this value. May
             be ``None``.
         """
-        return value
+        # The default returns the value as-is so subclasses that only customize
+        # metadata are not forced to redeclare ``convert``.
+        return t.cast("ParamTypeValue", value)
 
     def split_envvar_value(self, rv: str) -> cabc.Sequence[str]:
         """Given a value from an environment variable this splits it up
@@ -2315,39 +2555,44 @@ class ParamType:
         return []
 
 
-class CompositeParamType(ParamType):
+class CompositeParamType(ParamType[ParamTypeValue]):
     is_composite = True
 
     @property
-    def arity(self) -> int:  # type: ignore
-        raise NotImplementedError()
+    @abc.abstractmethod
+    def arity(self) -> int: ...  # type: ignore[override]
 
 
-class FuncParamType(ParamType):
-    def __init__(self, func: t.Callable[[t.Any], t.Any]) -> None:
+class FuncParamTypeInfoDict(ParamTypeInfoDict):
+    func: t.Callable[[t.Any], t.Any]
+
+
+class FuncParamType(ParamType[ParamTypeValue]):
+    def __init__(self, func: t.Callable[[t.Any], ParamTypeValue]) -> None:
         self.name: str = func.__name__
         self.func = func
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict["func"] = self.func
-        return info_dict
+    def to_info_dict(self) -> FuncParamTypeInfoDict:
+        return {"func": self.func, **super().to_info_dict()}
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> ParamTypeValue:
         try:
             return self.func(value)
-        except ValueError:
-            try:
-                value = str(value)
-            except UnicodeError:
-                value = value.decode("utf-8", "replace")
+        except ValueError as exc:
+            message = str(exc)
 
-            self.fail(value, param, ctx)
+            if not message:
+                try:
+                    message = str(value)
+                except UnicodeError:
+                    message = value.decode("utf-8", "replace")
+
+            self.fail(message, param, ctx)
 
 
-class UnprocessedParamType(ParamType):
+class UnprocessedParamType(ParamType[t.Any]):
     name = "text"
 
     def convert(
@@ -2359,12 +2604,12 @@ class UnprocessedParamType(ParamType):
         return "UNPROCESSED"
 
 
-class StringParamType(ParamType):
+class StringParamType(ParamType[str]):
     name = "text"
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> str:
         if isinstance(value, bytes):
             enc = _get_argv_encoding()
             try:
@@ -2378,14 +2623,19 @@ class StringParamType(ParamType):
                         value = value.decode("utf-8", "replace")
                 else:
                     value = value.decode("utf-8", "replace")
-            return value
+            return value  # type: ignore[no-any-return]
         return str(value)
 
     def __repr__(self) -> str:
         return "STRING"
 
 
-class Choice(ParamType, t.Generic[ParamTypeValue]):
+class ChoiceInfoDict(ParamTypeInfoDict):
+    choices: cabc.Sequence[t.Any]
+    case_sensitive: bool
+
+
+class Choice(ParamType[ParamTypeValue], t.Generic[ParamTypeValue]):
     """The choice type allows a value to be checked against a fixed set
     of supported values.
 
@@ -2416,11 +2666,12 @@ class Choice(ParamType, t.Generic[ParamTypeValue]):
         self.choices: cabc.Sequence[ParamTypeValue] = tuple(choices)
         self.case_sensitive = case_sensitive
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict["choices"] = self.choices
-        info_dict["case_sensitive"] = self.case_sensitive
-        return info_dict
+    def to_info_dict(self) -> ChoiceInfoDict:
+        return {
+            "choices": self.choices,
+            "case_sensitive": self.case_sensitive,
+            **super().to_info_dict(),
+        }
 
     def _normalized_mapping(
         self, ctx: Context | None = None
@@ -2527,7 +2778,7 @@ class Choice(ParamType, t.Generic[ParamTypeValue]):
         ).format(value=value, choice=choices_str, choices=choices_str)
 
     def __repr__(self) -> str:
-        return f"Choice({list(self.choices)})"
+        return _("Choice({choices})").format(choices=list(self.choices))
 
     def shell_complete(
         self, ctx: Context, param: Parameter, incomplete: str
@@ -2542,8 +2793,7 @@ class Choice(ParamType, t.Generic[ParamTypeValue]):
         """
         from click.shell_completion import CompletionItem
 
-        str_choices = map(str, self.choices)
-
+        str_choices = [self.normalize_choice(choice, ctx) for choice in self.choices]
         if self.case_sensitive:
             matched = (c for c in str_choices if c.startswith(incomplete))
         else:
@@ -2553,7 +2803,11 @@ class Choice(ParamType, t.Generic[ParamTypeValue]):
         return [CompletionItem(c) for c in matched]
 
 
-class DateTime(ParamType):
+class DateTimeInfoDict(ParamTypeInfoDict):
+    formats: cabc.Sequence[str]
+
+
+class DateTime(ParamType[datetime]):
     """The DateTime type converts date strings into `datetime` objects.
 
     The format strings which are checked are configurable, but default to some
@@ -2583,10 +2837,8 @@ class DateTime(ParamType):
             "%Y-%m-%d %H:%M:%S",
         ]
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict["formats"] = self.formats
-        return info_dict
+    def to_info_dict(self) -> DateTimeInfoDict:
+        return {"formats": self.formats, **super().to_info_dict()}
 
     def get_metavar(self, param: Parameter, ctx: Context) -> str | None:
         return f"[{'|'.join(self.formats)}]"
@@ -2599,7 +2851,7 @@ class DateTime(ParamType):
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> datetime:
         if isinstance(value, datetime):
             return value
 
@@ -2624,12 +2876,12 @@ class DateTime(ParamType):
         return "DateTime"
 
 
-class _NumberParamTypeBase(ParamType):
-    _number_class: t.ClassVar[type[t.Any]]
+class _NumberParamTypeBase(ParamType[ParamTypeValue]):
+    _number_class: t.Callable[[t.Any], ParamTypeValue]
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> ParamTypeValue:
         try:
             return self._number_class(value)
         except ValueError:
@@ -2642,7 +2894,15 @@ class _NumberParamTypeBase(ParamType):
             )
 
 
-class _NumberRangeBase(_NumberParamTypeBase):
+class NumberRangeInfoDict(ParamTypeInfoDict):
+    min: float | None
+    max: float | None
+    min_open: bool
+    max_open: bool
+    clamp: bool
+
+
+class _NumberRangeBase(_NumberParamTypeBase[ParamTypeValue]):
     def __init__(
         self,
         min: float | None = None,
@@ -2657,36 +2917,37 @@ class _NumberRangeBase(_NumberParamTypeBase):
         self.max_open = max_open
         self.clamp = clamp
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict.update(
-            min=self.min,
-            max=self.max,
-            min_open=self.min_open,
-            max_open=self.max_open,
-            clamp=self.clamp,
-        )
-        return info_dict
+    def to_info_dict(self) -> NumberRangeInfoDict:
+        return {
+            "min": self.min,
+            "max": self.max,
+            "min_open": self.min_open,
+            "max_open": self.max_open,
+            "clamp": self.clamp,
+            **super().to_info_dict(),
+        }
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> ParamTypeValue:
         import operator
 
         rv = super().convert(value, param, ctx)
-        lt_min: bool = self.min is not None and (
+        min = self.min
+        max = self.max
+        lt_min: bool = min is not None and (
             operator.le if self.min_open else operator.lt
-        )(rv, self.min)
-        gt_max: bool = self.max is not None and (
+        )(rv, min)  # type: ignore[arg-type]
+        gt_max: bool = max is not None and (
             operator.ge if self.max_open else operator.gt
-        )(rv, self.max)
+        )(rv, max)  # type: ignore[arg-type]
 
         if self.clamp:
-            if lt_min:
-                return self._clamp(self.min, 1, self.min_open)  # type: ignore
+            if min is not None and lt_min:
+                return self._clamp(min, 1, self.min_open)  # type: ignore[arg-type]
 
-            if gt_max:
-                return self._clamp(self.max, -1, self.max_open)  # type: ignore
+            if max is not None and gt_max:
+                return self._clamp(max, -1, self.max_open)  # type: ignore[arg-type]
 
         if lt_min or gt_max:
             self.fail(
@@ -2699,7 +2960,10 @@ class _NumberRangeBase(_NumberParamTypeBase):
 
         return rv
 
-    def _clamp(self, bound: float, dir: t.Literal[1, -1], open: bool) -> float:
+    @abc.abstractmethod
+    def _clamp(
+        self, bound: ParamTypeValue, dir: t.Literal[1, -1], open: bool
+    ) -> ParamTypeValue:
         """Find the valid value to clamp to bound in the given
         direction.
 
@@ -2707,7 +2971,7 @@ class _NumberRangeBase(_NumberParamTypeBase):
         :param dir: 1 or -1 indicating the direction to move.
         :param open: If true, the range does not include the bound.
         """
-        raise NotImplementedError
+        ...
 
     def _describe_range(self) -> str:
         """Describe the range for use in help text."""
@@ -2728,7 +2992,7 @@ class _NumberRangeBase(_NumberParamTypeBase):
         return f"<{type(self).__name__} {self._describe_range()}{clamp}>"
 
 
-class IntParamType(_NumberParamTypeBase):
+class IntParamType(_NumberParamTypeBase[int]):
     name = "integer"
     _number_class = int
 
@@ -2736,7 +3000,7 @@ class IntParamType(_NumberParamTypeBase):
         return "INT"
 
 
-class IntRange(_NumberRangeBase, IntParamType):
+class IntRange(_NumberRangeBase[int], IntParamType):
     """Restrict an :data:`click.INT` value to a range of accepted
     values. See :ref:`ranges`.
 
@@ -2753,16 +3017,14 @@ class IntRange(_NumberRangeBase, IntParamType):
 
     name = "integer range"
 
-    def _clamp(  # type: ignore
-        self, bound: int, dir: t.Literal[1, -1], open: bool
-    ) -> int:
+    def _clamp(self, bound: int, dir: t.Literal[1, -1], open: bool) -> int:
         if not open:
             return bound
 
         return bound + dir
 
 
-class FloatParamType(_NumberParamTypeBase):
+class FloatParamType(_NumberParamTypeBase[float]):
     name = "float"
     _number_class = float
 
@@ -2770,7 +3032,7 @@ class FloatParamType(_NumberParamTypeBase):
         return "FLOAT"
 
 
-class FloatRange(_NumberRangeBase, FloatParamType):
+class FloatRange(_NumberRangeBase[float], FloatParamType):
     """Restrict a :data:`click.FLOAT` value to a range of accepted
     values. See :ref:`ranges`.
 
@@ -2813,7 +3075,7 @@ class FloatRange(_NumberRangeBase, FloatParamType):
         raise RuntimeError("Clamping is not supported for open bounds.")
 
 
-class BoolParamType(ParamType):
+class BoolParamType(ParamType[bool]):
     name = "boolean"
 
     bool_states: dict[str, bool] = {
@@ -2882,14 +3144,12 @@ class BoolParamType(ParamType):
         return "BOOL"
 
 
-class UUIDParameterType(ParamType):
+class UUIDParameterType(ParamType[uuid.UUID]):
     name = "uuid"
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
-        import uuid
-
+    ) -> uuid.UUID:
         if isinstance(value, uuid.UUID):
             return value
 
@@ -2906,7 +3166,12 @@ class UUIDParameterType(ParamType):
         return "UUID"
 
 
-class File(ParamType):
+class FileInfoDict(ParamTypeInfoDict):
+    mode: str
+    encoding: str | None
+
+
+class File(ParamType[t.IO[t.Any]]):
     """Declares a parameter to be a file for reading or writing.  The file
     is automatically closed once the context tears down (after the command
     finished working).
@@ -2953,10 +3218,12 @@ class File(ParamType):
         self.lazy = lazy
         self.atomic = atomic
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict.update(mode=self.mode, encoding=self.encoding)
-        return info_dict
+    def to_info_dict(self) -> FileInfoDict:
+        return {
+            "mode": self.mode,
+            "encoding": self.encoding,
+            **super().to_info_dict(),
+        }
 
     def resolve_lazy_flag(self, value: str | os.PathLike[str]) -> bool:
         if self.lazy is not None:
@@ -3008,7 +3275,11 @@ class File(ParamType):
 
             return f
         except OSError as e:
-            self.fail(f"'{format_filename(value)}': {e.strerror}", param, ctx)
+            self.fail(
+                f"'{format_filename(value)}': {e.strerror}",
+                param,
+                ctx,
+            )
 
     def shell_complete(
         self, ctx: Context, param: Parameter, incomplete: str
@@ -3031,7 +3302,16 @@ def _is_file_like(value: t.Any) -> te.TypeGuard[t.IO[t.Any]]:
     return hasattr(value, "read") or hasattr(value, "write")
 
 
-class Path(ParamType):
+class PathInfoDict(ParamTypeInfoDict):
+    exists: bool
+    file_okay: bool
+    dir_okay: bool
+    writable: bool
+    readable: bool
+    allow_dash: bool
+
+
+class Path(ParamType[str | bytes | os.PathLike[str]]):
     """The ``Path`` type is similar to the :class:`File` type, but
     returns the filename instead of an open file. Various checks can be
     enabled to validate the type of file and permissions.
@@ -3095,17 +3375,16 @@ class Path(ParamType):
         else:
             self.name = _("path")
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict.update(
-            exists=self.exists,
-            file_okay=self.file_okay,
-            dir_okay=self.dir_okay,
-            writable=self.writable,
-            readable=self.readable,
-            allow_dash=self.allow_dash,
-        )
-        return info_dict
+    def to_info_dict(self) -> PathInfoDict:
+        return {
+            "exists": self.exists,
+            "file_okay": self.file_okay,
+            "dir_okay": self.dir_okay,
+            "writable": self.writable,
+            "readable": self.readable,
+            "allow_dash": self.allow_dash,
+            **super().to_info_dict(),
+        }
 
     def coerce_path_result(
         self, value: str | os.PathLike[str]
@@ -3212,7 +3491,11 @@ class Path(ParamType):
         return [CompletionItem(incomplete, type=type)]
 
 
-class Tuple(CompositeParamType):
+class TupleInfoDict(ParamTypeInfoDict):
+    types: cabc.Sequence[ParamTypeInfoDict]
+
+
+class Tuple(CompositeParamType[tuple[t.Any, ...]]):
     """The default behavior of Click is to apply a type on a value directly.
     This works well in most cases, except for when `nargs` is set to a fixed
     count and different types should be used for different items.  In this
@@ -3226,25 +3509,26 @@ class Tuple(CompositeParamType):
     :param types: a list of types that should be used for the tuple items.
     """
 
-    def __init__(self, types: cabc.Sequence[type[t.Any] | ParamType]) -> None:
-        self.types: cabc.Sequence[ParamType] = [convert_type(ty) for ty in types]
+    def __init__(self, types: cabc.Sequence[type[t.Any] | ParamType[t.Any]]) -> None:
+        self.types: cabc.Sequence[ParamType[t.Any]] = [convert_type(ty) for ty in types]
 
-    def to_info_dict(self) -> dict[str, t.Any]:
-        info_dict = super().to_info_dict()
-        info_dict["types"] = [t.to_info_dict() for t in self.types]
-        return info_dict
+    def to_info_dict(self) -> TupleInfoDict:
+        return {
+            "types": [ty.to_info_dict() for ty in self.types],
+            **super().to_info_dict(),
+        }
 
     @property
-    def name(self) -> str:  # type: ignore
+    def name(self) -> str:  # type: ignore[override]
         return f"<{' '.join(ty.name for ty in self.types)}>"
 
     @property
-    def arity(self) -> int:  # type: ignore
+    def arity(self) -> int:  # type: ignore[override]
         return len(self.types)
 
     def convert(
         self, value: t.Any, param: Parameter | None, ctx: Context | None
-    ) -> t.Any:
+    ) -> tuple[t.Any, ...]:
         len_type = len(self.types)
         len_value = len(value)
 
@@ -3264,64 +3548,99 @@ class Tuple(CompositeParamType):
         )
 
 
-def convert_type(ty: t.Any | None, default: t.Any | None = None) -> ParamType:
+def _guess_type(
+    ty: type[t.Any] | ParamType[t.Any] | None,
+    default: t.Any | None,
+) -> type[t.Any] | tuple[type[t.Any], ...] | ParamType[t.Any] | None:
+    """Infer a type from *ty* or *default*.
+
+    Returns *ty* unchanged when it is not ``None``.  Otherwise inspects
+    *default* to produce a ``type``, a ``tuple`` of types (for tuple
+    defaults), or ``None``.
+    """
+    if ty is not None:
+        return ty
+
+    if default is None:
+        return None
+
+    if not isinstance(default, (tuple, list)):
+        return type(default)
+
+    # If the default is empty, return None so convert_type falls
+    # through to STRING.
+    if not default:
+        return None
+
+    item = default[0]
+
+    # A sequence of iterables needs to detect the inner types.
+    # Can't call convert_type recursively because that would
+    # incorrectly unwind the tuple to a single type.
+    if isinstance(item, (tuple, list)):
+        return tuple(map(type, item))
+
+    return type(item)
+
+
+@t.overload
+def convert_type(ty: None, default: None = None) -> StringParamType: ...
+
+
+@t.overload
+def convert_type(
+    ty: type[t.Any] | ParamType[t.Any], default: t.Any | None = None
+) -> ParamType[t.Any]: ...
+
+
+@t.overload
+def convert_type(
+    ty: t.Any | None, default: t.Any | None = None
+) -> ParamType[t.Any]: ...
+
+
+def convert_type(
+    ty: t.Any | None = None, default: t.Any | None = None
+) -> ParamType[t.Any]:
     """Find the most appropriate :class:`ParamType` for the given Python
     type. If the type isn't provided, it can be inferred from a default
     value.
     """
-    guessed_type = False
+    guessed = _guess_type(ty, default)
+    is_guessed = guessed is not ty
 
-    if ty is None and default is not None:
-        if isinstance(default, (tuple, list)):
-            # If the default is empty, ty will remain None and will
-            # return STRING.
-            if default:
-                item = default[0]
+    if isinstance(guessed, tuple):
+        return Tuple(guessed)
 
-                # A tuple of tuples needs to detect the inner types.
-                # Can't call convert recursively because that would
-                # incorrectly unwind the tuple to a single type.
-                if isinstance(item, (tuple, list)):
-                    ty = tuple(map(type, item))
-                else:
-                    ty = type(item)
-        else:
-            ty = type(default)
+    if isinstance(guessed, ParamType):
+        return guessed
 
-        guessed_type = True
-
-    if isinstance(ty, tuple):
-        return Tuple(ty)
-
-    if isinstance(ty, ParamType):
-        return ty
-
-    if ty is str or ty is None:
+    if guessed is str or guessed is None:
         return STRING
 
-    if ty is int:
+    if guessed is int:
         return INT
 
-    if ty is float:
+    if guessed is float:
         return FLOAT
 
-    if ty is bool:
+    if guessed is bool:
         return BOOL
 
-    if guessed_type:
+    if is_guessed:
         return STRING
 
     if __debug__:
         try:
-            if issubclass(ty, ParamType):
+            if issubclass(guessed, ParamType):
                 raise AssertionError(
-                    f"Attempted to use an uninstantiated parameter type ({ty})."
+                    f"Attempted to use an uninstantiated parameter type ({guessed})."
                 )
         except TypeError:
-            # ty is an instance (correct), so issubclass fails.
+            # guessed is an instance (correct), so issubclass fails.
             pass
 
-    return FuncParamType(ty)
+    return FuncParamType(guessed)
 
 
 #: A dummy parameter type that just does nothing.  From a user's
@@ -3332,7 +3651,7 @@ def convert_type(ty: t.Any | None, default: t.Any | None = None) -> ParamType:
 #:
 #: For path related uses the :class:`Path` type is a better choice but
 #: there are situations where an unprocessed type is useful which is why
-#: it is is provided.
+#: it is provided.
 #:
 #: .. versionadded:: 4.0
 UNPROCESSED = UnprocessedParamType()
@@ -3377,6 +3696,7 @@ import re
 import sys
 import typing as t
 from functools import update_wrapper
+from gettext import gettext as _
 from types import ModuleType
 from types import TracebackType
 
@@ -3428,7 +3748,10 @@ def make_str(value: t.Any) -> str:
 
 
 def make_default_short_help(help: str, max_length: int = 45) -> str:
-    """Returns a condensed version of help string."""
+    """Returns a condensed version of help string.
+
+    :meta private:
+    """
     # Consider only the first paragraph.
     paragraph_end = help.find("\n\n")
 
@@ -3484,6 +3807,14 @@ class LazyFile:
     files for writing.
     """
 
+    name: str
+    mode: str
+    encoding: str | None
+    errors: str | None
+    atomic: bool
+    _f: t.IO[t.Any] | None
+    should_close: bool
+
     def __init__(
         self,
         filename: str | os.PathLike[str],
@@ -3491,14 +3822,12 @@ class LazyFile:
         encoding: str | None = None,
         errors: str | None = "strict",
         atomic: bool = False,
-    ):
-        self.name: str = os.fspath(filename)
+    ) -> None:
+        self.name = os.fspath(filename)
         self.mode = mode
         self.encoding = encoding
         self.errors = errors
         self.atomic = atomic
-        self._f: t.IO[t.Any] | None
-        self.should_close: bool
 
         if self.name == "-":
             self._f, self.should_close = open_stream(filename, mode, encoding, errors)
@@ -3566,8 +3895,10 @@ class LazyFile:
 
 
 class KeepOpenFile:
+    _file: t.IO[t.Any]
+
     def __init__(self, file: t.IO[t.Any]) -> None:
-        self._file: t.IO[t.Any] = file
+        self._file = file
 
     def __getattr__(self, name: str) -> t.Any:
         return getattr(self._file, name)
@@ -3701,7 +4032,7 @@ def get_binary_stream(name: t.Literal["stdin", "stdout", "stderr"]) -> t.BinaryI
     """
     opener = binary_streams.get(name)
     if opener is None:
-        raise TypeError(f"Unknown standard stream '{name}'")
+        raise TypeError(_("Unknown standard stream '{name}'").format(name=name))
     return opener()
 
 
@@ -3722,7 +4053,7 @@ def get_text_stream(
     """
     opener = text_streams.get(name)
     if opener is None:
-        raise TypeError(f"Unknown standard stream '{name}'")
+        raise TypeError(_("Unknown standard stream '{name}'").format(name=name))
     return opener(encoding, errors)
 
 
@@ -3874,6 +4205,8 @@ class PacifyFlushWrapper:
     other cleanup code, and the case where the underlying file is not a broken
     pipe, all calls and attributes are proxied.
     """
+
+    wrapped: t.IO[t.Any]
 
     def __init__(self, wrapped: t.IO[t.Any]) -> None:
         self.wrapped = wrapped
@@ -4419,6 +4752,17 @@ def test_nargs_specified_plus_star_ordering(runner):
     ],
 )
 def test_good_defaults_for_nargs(runner, argument_params, args, expected):
+    """Comprehensive check of default-value processing for arguments with
+    ``nargs``.
+
+    .. hint::
+        An option-specific equivalent is available in
+        ``test_options.py::test_good_defaults_for_multiple``.
+
+        A smoke test covering a single basic case is in
+        ``test_defaults.py::test_nargs_plus_multiple``.
+    """
+
     @click.command()
     @click.argument("a", type=int, **argument_params)
     def cmd(a):
@@ -4961,6 +5305,12 @@ def test_flag_value_dual_options(runner, default, args, expected):
 
     Covers the regression reported in
     https://github.com/pallets/click/issues/3024#issuecomment-3146199461
+
+    .. hint::
+        Similar to ``test_options.py::test_default_dual_option_callback``.
+
+        ``test_defaults.py::test_shared_param_prefers_first_default``
+        is a smoke-test complement that exercises both default placements.
     """
 
     @click.command()
@@ -5729,604 +6079,5 @@ def test_generate_name(name: str) -> None:
     f.__name__ = name
     f = click.command(f)
     assert f.name == "init-data"
-
-```
----
-
-## tests/test_commands.py
-
-```python
-import re
-
-import pytest
-
-import click
-
-
-def test_other_command_invoke(runner):
-    @click.command()
-    @click.pass_context
-    def cli(ctx):
-        return ctx.invoke(other_cmd, arg=42)
-
-    @click.command()
-    @click.argument("arg", type=click.INT)
-    def other_cmd(arg):
-        click.echo(arg)
-
-    result = runner.invoke(cli, [])
-    assert not result.exception
-    assert result.output == "42\n"
-
-
-def test_other_command_forward(runner):
-    cli = click.Group()
-
-    @cli.command()
-    @click.option("--count", default=1)
-    def test(count):
-        click.echo(f"Count: {count:d}")
-
-    @cli.command()
-    @click.option("--count", default=1)
-    @click.pass_context
-    def dist(ctx, count):
-        ctx.forward(test)
-        ctx.invoke(test, count=42)
-
-    result = runner.invoke(cli, ["dist"])
-    assert not result.exception
-    assert result.output == "Count: 1\nCount: 42\n"
-
-
-def test_forwarded_params_consistency(runner):
-    cli = click.Group()
-
-    @cli.command()
-    @click.option("-a")
-    @click.pass_context
-    def first(ctx, **kwargs):
-        click.echo(f"{ctx.params}")
-
-    @cli.command()
-    @click.option("-a")
-    @click.option("-b")
-    @click.pass_context
-    def second(ctx, **kwargs):
-        click.echo(f"{ctx.params}")
-        ctx.forward(first)
-
-    result = runner.invoke(cli, ["second", "-a", "foo", "-b", "bar"])
-    assert not result.exception
-    assert result.output == "{'a': 'foo', 'b': 'bar'}\n{'a': 'foo', 'b': 'bar'}\n"
-
-
-def test_auto_shorthelp(runner):
-    @click.group()
-    def cli():
-        pass
-
-    @cli.command()
-    def short():
-        """This is a short text."""
-
-    @cli.command()
-    def special_chars():
-        """Login and store the token in ~/.netrc."""
-
-    @cli.command()
-    def long():
-        """This is a long text that is too long to show as short help
-        and will be truncated instead."""
-
-    result = runner.invoke(cli, ["--help"])
-    assert (
-        re.search(
-            r"Commands:\n\s+"
-            r"long\s+This is a long text that is too long to show as short help"
-            r"\.\.\.\n\s+"
-            r"short\s+This is a short text\.\n\s+"
-            r"special-chars\s+Login and store the token in ~/.netrc\.\s*",
-            result.output,
-        )
-        is not None
-    )
-
-
-def test_command_no_args_is_help(runner):
-    result = runner.invoke(click.Command("test", no_args_is_help=True))
-    assert result.exit_code == 2
-    assert "Show this message and exit." in result.output
-
-
-def test_default_maps(runner):
-    @click.group()
-    def cli():
-        pass
-
-    @cli.command()
-    @click.option("--name", default="normal")
-    def foo(name):
-        click.echo(name)
-
-    result = runner.invoke(cli, ["foo"], default_map={"foo": {"name": "changed"}})
-
-    assert not result.exception
-    assert result.output == "changed\n"
-
-
-@pytest.mark.parametrize(
-    ("args", "exit_code", "expect"),
-    [
-        (["obj1"], 2, "Error: Missing command."),
-        (["obj1", "--help"], 0, "Show this message and exit."),
-        (["obj1", "move"], 0, "obj=obj1\nmove\n"),
-        ([], 2, "Show this message and exit."),
-    ],
-)
-def test_group_with_args(runner, args, exit_code, expect):
-    @click.group()
-    @click.argument("obj")
-    def cli(obj):
-        click.echo(f"obj={obj}")
-
-    @cli.command()
-    def move():
-        click.echo("move")
-
-    result = runner.invoke(cli, args)
-    assert result.exit_code == exit_code
-    assert expect in result.output
-
-
-def test_custom_parser(runner):
-    import optparse
-
-    @click.group()
-    def cli():
-        pass
-
-    class OptParseCommand(click.Command):
-        def __init__(self, name, parser, callback):
-            super().__init__(name)
-            self.parser = parser
-            self.callback = callback
-
-        def parse_args(self, ctx, args):
-            try:
-                opts, args = parser.parse_args(args)
-            except Exception as e:
-                ctx.fail(str(e))
-            ctx.args = args
-            ctx.params = vars(opts)
-
-        def get_usage(self, ctx):
-            return self.parser.get_usage()
-
-        def get_help(self, ctx):
-            return self.parser.format_help()
-
-        def invoke(self, ctx):
-            ctx.invoke(self.callback, ctx.args, **ctx.params)
-
-    parser = optparse.OptionParser(usage="Usage: foo test [OPTIONS]")
-    parser.add_option(
-        "-f", "--file", dest="filename", help="write report to FILE", metavar="FILE"
-    )
-    parser.add_option(
-        "-q",
-        "--quiet",
-        action="store_false",
-        dest="verbose",
-        default=True,
-        help="don't print status messages to stdout",
-    )
-
-    def test_callback(args, filename, verbose):
-        click.echo(" ".join(args))
-        click.echo(filename)
-        click.echo(verbose)
-
-    cli.add_command(OptParseCommand("test", parser, test_callback))
-
-    result = runner.invoke(cli, ["test", "-f", "f.txt", "-q", "q1.txt", "q2.txt"])
-    assert result.exception is None
-    assert result.output.splitlines() == ["q1.txt q2.txt", "f.txt", "False"]
-
-    result = runner.invoke(cli, ["test", "--help"])
-    assert result.exception is None
-    assert result.output.splitlines() == [
-        "Usage: foo test [OPTIONS]",
-        "",
-        "Options:",
-        "  -h, --help            show this help message and exit",
-        "  -f FILE, --file=FILE  write report to FILE",
-        "  -q, --quiet           don't print status messages to stdout",
-    ]
-
-
-def test_object_propagation(runner):
-    for chain in False, True:
-
-        @click.group(chain=chain)
-        @click.option("--debug/--no-debug", default=False)
-        @click.pass_context
-        def cli(ctx, debug):
-            if ctx.obj is None:
-                ctx.obj = {}
-            ctx.obj["DEBUG"] = debug
-
-        @cli.command()
-        @click.pass_context
-        def sync(ctx):
-            click.echo(f"Debug is {'on' if ctx.obj['DEBUG'] else 'off'}")
-
-        result = runner.invoke(cli, ["sync"])
-        assert result.exception is None
-        assert result.output == "Debug is off\n"
-
-
-@pytest.mark.parametrize(
-    ("opt_params", "expected"),
-    (
-        # Original tests.
-        ({"type": click.INT, "default": 42}, 42),
-        ({"type": click.INT, "default": "15"}, 15),
-        ({"multiple": True}, ()),
-        # SENTINEL value tests.
-        ({"default": None}, None),
-        ({"type": click.STRING}, None),  # No default specified, should be None.
-        ({"type": click.BOOL, "default": False}, False),
-        ({"type": click.BOOL, "default": True}, True),
-        ({"type": click.FLOAT, "default": 3.14}, 3.14),
-        # Multiple with default.
-        ({"multiple": True, "default": [1, 2, 3]}, (1, 2, 3)),
-        ({"multiple": True, "default": ()}, ()),
-        # Required option without value should use SENTINEL behavior.
-        ({"required": False}, None),
-        # Choice type with default.
-        ({"type": click.Choice(["a", "b", "c"]), "default": "b"}, "b"),
-        # Path type with default.
-        ({"type": click.Path(), "default": "/tmp"}, "/tmp"),
-        # Flag options.
-        ({"is_flag": True, "default": False}, False),
-        ({"is_flag": True, "default": True}, True),
-        # Count option.
-        ({"count": True}, 0),
-        # Hidden option.
-        ({"hidden": True, "default": "secret"}, "secret"),
-    ),
-)
-def test_other_command_invoke_with_defaults(runner, opt_params, expected):
-    @click.command()
-    @click.pass_context
-    def cli(ctx):
-        return ctx.invoke(other_cmd)
-
-    @click.command()
-    @click.option("-a", **opt_params)
-    @click.pass_context
-    def other_cmd(ctx, a):
-        return ctx.info_name, a
-
-    result = runner.invoke(cli, standalone_mode=False)
-
-    assert result.return_value == ("other", expected)
-
-
-def test_invoked_subcommand(runner):
-    @click.group(invoke_without_command=True)
-    @click.pass_context
-    def cli(ctx):
-        if ctx.invoked_subcommand is None:
-            click.echo("no subcommand, use default")
-            ctx.invoke(sync)
-        else:
-            click.echo("invoke subcommand")
-
-    @cli.command()
-    def sync():
-        click.echo("in subcommand")
-
-    result = runner.invoke(cli, ["sync"])
-    assert not result.exception
-    assert result.output == "invoke subcommand\nin subcommand\n"
-
-    result = runner.invoke(cli)
-    assert not result.exception
-    assert result.output == "no subcommand, use default\nin subcommand\n"
-
-
-def test_aliased_command_canonical_name(runner):
-    class AliasedGroup(click.Group):
-        def get_command(self, ctx, cmd_name):
-            return push
-
-        def resolve_command(self, ctx, args):
-            _, command, args = super().resolve_command(ctx, args)
-            return command.name, command, args
-
-    cli = AliasedGroup()
-
-    @cli.command()
-    def push():
-        click.echo("push command")
-
-    result = runner.invoke(cli, ["pu", "--help"])
-    assert not result.exception
-    assert result.output.startswith("Usage: root push [OPTIONS]")
-
-
-def test_group_add_command_name(runner):
-    cli = click.Group("cli")
-    cmd = click.Command("a", params=[click.Option(["-x"], required=True)])
-    cli.add_command(cmd, "b")
-    # Check that the command is accessed through the registered name,
-    # not the original name.
-    result = runner.invoke(cli, ["b"], default_map={"b": {"x": 3}})
-    assert result.exit_code == 0
-
-
-@pytest.mark.parametrize(
-    ("invocation_order", "declaration_order", "expected_order"),
-    [
-        # Non-eager options.
-        ([], ["-a"], ["-a"]),
-        (["-a"], ["-a"], ["-a"]),
-        ([], ["-a", "-c"], ["-a", "-c"]),
-        (["-a"], ["-a", "-c"], ["-a", "-c"]),
-        (["-c"], ["-a", "-c"], ["-c", "-a"]),
-        ([], ["-c", "-a"], ["-c", "-a"]),
-        (["-a"], ["-c", "-a"], ["-a", "-c"]),
-        (["-c"], ["-c", "-a"], ["-c", "-a"]),
-        (["-a", "-c"], ["-a", "-c"], ["-a", "-c"]),
-        (["-c", "-a"], ["-a", "-c"], ["-c", "-a"]),
-        # Eager options.
-        ([], ["-b"], ["-b"]),
-        (["-b"], ["-b"], ["-b"]),
-        ([], ["-b", "-d"], ["-b", "-d"]),
-        (["-b"], ["-b", "-d"], ["-b", "-d"]),
-        (["-d"], ["-b", "-d"], ["-d", "-b"]),
-        ([], ["-d", "-b"], ["-d", "-b"]),
-        (["-b"], ["-d", "-b"], ["-b", "-d"]),
-        (["-d"], ["-d", "-b"], ["-d", "-b"]),
-        (["-b", "-d"], ["-b", "-d"], ["-b", "-d"]),
-        (["-d", "-b"], ["-b", "-d"], ["-d", "-b"]),
-        # Mixed options.
-        ([], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        (["-a"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        (["-b"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        (["-c"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-c", "-a"]),
-        (["-d"], ["-a", "-b", "-c", "-d"], ["-d", "-b", "-a", "-c"]),
-        (["-a", "-b"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        (["-b", "-a"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        (["-d", "-c"], ["-a", "-b", "-c", "-d"], ["-d", "-b", "-c", "-a"]),
-        (["-c", "-d"], ["-a", "-b", "-c", "-d"], ["-d", "-b", "-c", "-a"]),
-        (["-a", "-b", "-c", "-d"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        (["-b", "-d", "-a", "-c"], ["-a", "-b", "-c", "-d"], ["-b", "-d", "-a", "-c"]),
-        ([], ["-b", "-d", "-e", "-a", "-c"], ["-b", "-d", "-e", "-a", "-c"]),
-        (["-a", "-d"], ["-b", "-d", "-e", "-a", "-c"], ["-d", "-b", "-e", "-a", "-c"]),
-        (["-c", "-d"], ["-b", "-d", "-e", "-a", "-c"], ["-d", "-b", "-e", "-c", "-a"]),
-    ],
-)
-def test_iter_params_for_processing(
-    invocation_order, declaration_order, expected_order
-):
-    parameters = {
-        "-a": click.Option(["-a"]),
-        "-b": click.Option(["-b"], is_eager=True),
-        "-c": click.Option(["-c"]),
-        "-d": click.Option(["-d"], is_eager=True),
-        "-e": click.Option(["-e"], is_eager=True),
-    }
-
-    invocation_params = [parameters[opt_id] for opt_id in invocation_order]
-    declaration_params = [parameters[opt_id] for opt_id in declaration_order]
-    expected_params = [parameters[opt_id] for opt_id in expected_order]
-
-    assert (
-        click.core.iter_params_for_processing(invocation_params, declaration_params)
-        == expected_params
-    )
-
-
-def test_help_param_priority(runner):
-    """Cover the edge-case in which the eagerness of help option was not
-    respected, because it was internally generated multiple times.
-
-    See: https://github.com/pallets/click/pull/2811
-    """
-
-    def print_and_exit(ctx, param, value):
-        if value:
-            click.echo(f"Value of {param.name} is: {value}")
-            ctx.exit()
-
-    @click.command(context_settings={"help_option_names": ("--my-help",)})
-    @click.option("-a", is_flag=True, expose_value=False, callback=print_and_exit)
-    @click.option(
-        "-b", is_flag=True, expose_value=False, callback=print_and_exit, is_eager=True
-    )
-    def cli():
-        pass
-
-    # --my-help is properly called and stop execution.
-    result = runner.invoke(cli, ["--my-help"])
-    assert "Value of a is: True" not in result.stdout
-    assert "Value of b is: True" not in result.stdout
-    assert "--my-help" in result.stdout
-    assert result.exit_code == 0
-
-    # -a is properly called and stop execution.
-    result = runner.invoke(cli, ["-a"])
-    assert "Value of a is: True" in result.stdout
-    assert "Value of b is: True" not in result.stdout
-    assert "--my-help" not in result.stdout
-    assert result.exit_code == 0
-
-    # -a takes precedence over -b and stop execution.
-    result = runner.invoke(cli, ["-a", "-b"])
-    assert "Value of a is: True" not in result.stdout
-    assert "Value of b is: True" in result.stdout
-    assert "--my-help" not in result.stdout
-    assert result.exit_code == 0
-
-    # --my-help is eager by default so takes precedence over -a and stop
-    # execution, whatever the order.
-    for args in [["-a", "--my-help"], ["--my-help", "-a"]]:
-        result = runner.invoke(cli, args)
-        assert "Value of a is: True" not in result.stdout
-        assert "Value of b is: True" not in result.stdout
-        assert "--my-help" in result.stdout
-        assert result.exit_code == 0
-
-    # Both -b and --my-help are eager so they're called in the order they're
-    # invoked by the user.
-    result = runner.invoke(cli, ["-b", "--my-help"])
-    assert "Value of a is: True" not in result.stdout
-    assert "Value of b is: True" in result.stdout
-    assert "--my-help" not in result.stdout
-    assert result.exit_code == 0
-
-    # But there was a bug when --my-help is called before -b, because the
-    # --my-help option created by click via help_option_names is internally
-    # created twice and is not the same object, breaking the priority order
-    # produced by iter_params_for_processing.
-    result = runner.invoke(cli, ["--my-help", "-b"])
-    assert "Value of a is: True" not in result.stdout
-    assert "Value of b is: True" not in result.stdout
-    assert "--my-help" in result.stdout
-    assert result.exit_code == 0
-
-
-def test_unprocessed_options(runner):
-    @click.command(context_settings=dict(ignore_unknown_options=True))
-    @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-    @click.option("--verbose", "-v", count=True)
-    def cli(verbose, args):
-        click.echo(f"Verbosity: {verbose}")
-        click.echo(f"Args: {'|'.join(args)}")
-
-    result = runner.invoke(cli, ["-foo", "-vvvvx", "--muhaha", "x", "y", "-x"])
-    assert not result.exception
-    assert result.output.splitlines() == [
-        "Verbosity: 4",
-        "Args: -foo|-x|--muhaha|x|y|-x",
-    ]
-
-
-@pytest.mark.parametrize("doc", ["CLI HELP", None])
-@pytest.mark.parametrize("deprecated", [True, "USE OTHER COMMAND INSTEAD"])
-def test_deprecated_in_help_messages(runner, doc, deprecated):
-    @click.command(deprecated=deprecated, help=doc)
-    def cli():
-        pass
-
-    result = runner.invoke(cli, ["--help"])
-    assert "(DEPRECATED" in result.output
-
-    if isinstance(deprecated, str):
-        assert deprecated in result.output
-
-
-@pytest.mark.parametrize("deprecated", [True, "USE OTHER COMMAND INSTEAD"])
-def test_deprecated_in_invocation(runner, deprecated):
-    @click.command(deprecated=deprecated)
-    def deprecated_cmd():
-        pass
-
-    result = runner.invoke(deprecated_cmd)
-    assert "DeprecationWarning:" in result.output
-
-    if isinstance(deprecated, str):
-        assert deprecated in result.output
-
-
-def test_command_parse_args_collects_option_prefixes():
-    @click.command()
-    @click.option("+p", is_flag=True)
-    @click.option("!e", is_flag=True)
-    def test(p, e):
-        pass
-
-    ctx = click.Context(test)
-    test.parse_args(ctx, [])
-
-    assert ctx._opt_prefixes == {"-", "--", "+", "!"}
-
-
-def test_group_parse_args_collects_base_option_prefixes():
-    @click.group()
-    @click.option("~t", is_flag=True)
-    def group(t):
-        pass
-
-    @group.command()
-    @click.option("+p", is_flag=True)
-    def command1(p):
-        pass
-
-    @group.command()
-    @click.option("!e", is_flag=True)
-    def command2(e):
-        pass
-
-    ctx = click.Context(group)
-    group.parse_args(ctx, ["command1", "+p"])
-
-    assert ctx._opt_prefixes == {"-", "--", "~"}
-
-
-def test_group_invoke_collects_used_option_prefixes(runner):
-    opt_prefixes = set()
-
-    @click.group()
-    @click.option("~t", is_flag=True)
-    def group(t):
-        pass
-
-    @group.command()
-    @click.option("+p", is_flag=True)
-    @click.pass_context
-    def command1(ctx, p):
-        nonlocal opt_prefixes
-        opt_prefixes = ctx._opt_prefixes
-
-    @group.command()
-    @click.option("!e", is_flag=True)
-    def command2(e):
-        pass
-
-    runner.invoke(group, ["command1"])
-    assert opt_prefixes == {"-", "--", "~", "+"}
-
-
-@pytest.mark.parametrize("exc", (EOFError, KeyboardInterrupt))
-def test_abort_exceptions_with_disabled_standalone_mode(runner, exc):
-    @click.command()
-    def cli():
-        raise exc("catch me!")
-
-    rv = runner.invoke(cli, standalone_mode=False)
-    assert rv.exit_code == 1
-    assert isinstance(rv.exception.__cause__, exc)
-    assert rv.exception.__cause__.args == ("catch me!",)
-
-```
----
-
-## tests/test_compat.py
-
-```python
-from click._compat import should_strip_ansi
-
-
-def test_is_jupyter_kernel_output():
-    class JupyterKernelFakeStream:
-        pass
-
-    # implementation detail, aka cheapskate test
-    JupyterKernelFakeStream.__module__ = "ipykernel.faked"
-    assert not should_strip_ansi(stream=JupyterKernelFakeStream())
 
 ```

@@ -4,7 +4,7 @@ Generated for LLM prompt context.
 
 ## README.md
 
-```markdown
+````markdown
 # Repository Context Exporter
 
 A Python utility for exporting source repositories into compact Markdown context files for LLM prompting.
@@ -69,12 +69,12 @@ It prioritizes practical usefulness and portability over full repository seriali
 ## Author
 
 Luka Petrovic
-```
+````
 ---
 
-## repo_context_exporter.py
+## repo_context_exporter_1.py
 
-```python
+````python
 #!/usr/bin/env python3
 """
 Export a repository into markdown context files for LLM prompting.
@@ -114,7 +114,7 @@ MAX_OUTPUT_FILES = 8
 
 # Optional maximum size per output markdown file in KB.
 # Set to -1 to disable the threshold and always distribute evenly.
-MAX_OUTPUT_FILE_SIZE_KB = 200
+MAX_OUTPUT_FILE_SIZE_KB = 1000
 
 OUTPUT_DIR_NAME = "llm-context"
 TREE_FILE_NAME = "00_DIRECTORY_TREE.md"
@@ -124,6 +124,7 @@ READ_FILE_ERRORS = "replace"
 
 # Gitignore-like patterns for files that should NOT be included in code exports.
 EXPORT_IGNORE_PATTERNS = [
+    "repo_context_exporter.py",
     ".git/",
     ".idea/",
     ".vscode/",
@@ -147,6 +148,7 @@ EXPORT_IGNORE_PATTERNS = [
 
 # Separate ignore patterns for the directory tree export.
 TREE_IGNORE_PATTERNS = [
+    "repo_context_exporter.py",
     ".git/",
     "node_modules/",
     "dist/",
@@ -363,16 +365,39 @@ def read_text_file(path: Path) -> str:
     return path.read_text(encoding=READ_FILE_ENCODING, errors=READ_FILE_ERRORS)
 
 
+def make_markdown_fence(content: str, marker: str = "`") -> str:
+    """
+    Return a fence delimiter that cannot be closed by the file content.
+
+    Markdown files can contain their own fenced code blocks. If we always wrap
+    exported content in a plain triple-backtick block, an inner ``` line closes
+    the outer export block early. Using a fence longer than any same-marker run
+    in the content keeps the entire source file inside one wrapper block.
+    """
+    longest_run = 0
+    current_run = 0
+
+    for character in content:
+        if character == marker:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+
+    return marker * max(3, longest_run + 1)
+
+
 def make_file_block(root: Path, path: Path) -> FileBlock:
     rel_path = path.relative_to(root).as_posix()
     language = detect_language(path)
     content = read_text_file(path)
+    fence = make_markdown_fence(content)
 
     block = (
         f"## {rel_path}\n\n"
-        f"```{language}\n"
+        f"{fence}{language}\n"
         f"{content}"
-        f"\n```\n"
+        f"\n{fence}\n"
     )
 
     return FileBlock(
@@ -644,4 +669,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-```
+````

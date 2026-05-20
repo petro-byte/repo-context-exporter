@@ -90,7 +90,7 @@ BINARY_EXTENSIONS = {
     ".mp3", ".wav", ".ogg", ".flac", ".mp4", ".mov", ".avi", ".mkv",
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
     ".exe", ".dll", ".so", ".dylib", ".bin", ".class",
-    ".jar", ".pyc", ".pyo",
+    ".jar", ".pyc", ".pyo", ".frx",
 }
 
 # Optional extra file names to skip completely.
@@ -151,6 +151,10 @@ EXTENSION_TO_LANGUAGE = {
     ".svelte": "svelte",
     ".graphql": "graphql",
     ".gql": "graphql",
+    ".vbs": "vb",
+    ".bas": "vb",
+    ".cls": "vb",
+    ".frm": "vb"
 }
 
 SPECIAL_FILENAMES_TO_LANGUAGE = {
@@ -288,16 +292,39 @@ def read_text_file(path: Path) -> str:
     return path.read_text(encoding=READ_FILE_ENCODING, errors=READ_FILE_ERRORS)
 
 
+def make_markdown_fence(content: str, marker: str = "`") -> str:
+    """
+    Return a fence delimiter that cannot be closed by the file content.
+
+    Markdown files can contain their own fenced code blocks. If we always wrap
+    exported content in a plain triple-backtick block, an inner ``` line closes
+    the outer export block early. Using a fence longer than any same-marker run
+    in the content keeps the entire source file inside one wrapper block.
+    """
+    longest_run = 0
+    current_run = 0
+
+    for character in content:
+        if character == marker:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+
+    return marker * max(3, longest_run + 1)
+
+
 def make_file_block(root: Path, path: Path) -> FileBlock:
     rel_path = path.relative_to(root).as_posix()
     language = detect_language(path)
     content = read_text_file(path)
+    fence = make_markdown_fence(content)
 
     block = (
         f"## {rel_path}\n\n"
-        f"```{language}\n"
+        f"{fence}{language}\n"
         f"{content}"
-        f"\n```\n"
+        f"\n{fence}\n"
     )
 
     return FileBlock(

@@ -1,991 +1,4666 @@
-# Repository Context Part 6/6
+# Repository Context Part 6/7
 
 Generated for LLM prompt context.
 
-## tests/test_utils.py
+## tests/test_options.py
 
 ```python
+import enum
 import os
-import pathlib
-import stat
-import subprocess
+import re
 import sys
-from collections import namedtuple
+import tempfile
 from contextlib import nullcontext
-from decimal import Decimal
-from fractions import Fraction
-from functools import partial
-from io import StringIO
-from pathlib import Path
-from tempfile import tempdir
-from unittest.mock import patch
+from typing import Literal
+
+if sys.version_info < (3, 11):
+    enum.StrEnum = enum.Enum  # type: ignore[assignment]
 
 import pytest
 
-import click._termui_impl
-import click.utils
-from click._compat import WIN
+import click
+from click import Option
+from click import UNPROCESSED
 from click._utils import UNSET
+from click.testing import CliRunner
 
 
-def test_unset_sentinel():
-    value = UNSET
-
-    assert value
-    assert value is UNSET
-    assert value == UNSET
-    assert repr(value) == "Sentinel.UNSET"
-    assert str(value) == "Sentinel.UNSET"
-    assert bool(value) is True
-
-    # Try all native Python values that can be falsy or truthy.
-    # See: https://docs.python.org/3/library/stdtypes.html#truth-value-testing
-    real_values = (
-        None,
-        True,
-        False,
-        0,
-        1,
-        0.0,
-        1.0,
-        0j,
-        1j,
-        Decimal(0),
-        Decimal(1),
-        Fraction(0, 1),
-        Fraction(1, 1),
-        "",
-        "a",
-        "UNSET",
-        "Sentinel.UNSET",
-        [1],
-        (1),
-        {1: "a"},
-        set(),
-        set([1]),
-        frozenset(),
-        frozenset([1]),
-        range(0),
-        range(1),
-    )
-
-    for real_value in real_values:
-        assert value != real_value
-        assert value is not real_value
-
-    assert value not in real_values
-
-
-def test_echo(runner):
-    with runner.isolation() as outstreams:
-        click.echo("\N{SNOWMAN}")
-        click.echo(b"\x44\x44")
-        click.echo(42, nl=False)
-        click.echo(b"a", nl=False)
-        click.echo("\x1b[31mx\x1b[39m", nl=False)
-        bytes = outstreams[0].getvalue().replace(b"\r\n", b"\n")
-        assert bytes == b"\xe2\x98\x83\nDD\n42ax"
-
-    # if wrapped, we expect bytes to survive.
+def test_prefixes(runner):
     @click.command()
-    def cli():
-        click.echo(b"\xf6")
+    @click.option("++foo", is_flag=True, help="das foo")
+    @click.option("--bar", is_flag=True, help="das bar")
+    def cli(foo, bar):
+        click.echo(f"foo={foo} bar={bar}")
+
+    result = runner.invoke(cli, ["++foo", "--bar"])
+    assert not result.exception
+    assert result.output == "foo=True bar=True\n"
+
+    result = runner.invoke(cli, ["--help"])
+    assert re.search(r"\+\+foo\s+das foo", result.output) is not None
+    assert re.search(r"--bar\s+das bar", result.output) is not None
+
+
+def test_invalid_option(runner):
+    with pytest.raises(TypeError, match="name was passed") as exc_info:
+        click.Option(["foo"])
+
+    message = str(exc_info.value)
+    assert "name was passed (foo)" in message
+    assert "declare an argument" in message
+    assert "'--foo'" in message
+
+
+@pytest.mark.parametrize("deprecated", [True, "USE B INSTEAD"])
+def test_deprecated_usage(runner, deprecated):
+    @click.command()
+    @click.option("--foo", default="bar", deprecated=deprecated)
+    def cmd(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd, ["--help"])
+    assert "(DEPRECATED" in result.output
+
+    if isinstance(deprecated, str):
+        assert deprecated in result.output
+
+
+@pytest.mark.parametrize("deprecated", [True, "USE B INSTEAD"])
+def test_deprecated_warning(runner, deprecated):
+    @click.command()
+    @click.option(
+        "--my-option", required=False, deprecated=deprecated, default="default option"
+    )
+    def cli(my_option: str):
+        click.echo(f"{my_option}")
+
+    # defaults should not give a deprecated warning
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 0, result.output
+    assert "is deprecated" not in result.output
+
+    result = runner.invoke(cli, ["--my-option", "hello"])
+    assert result.exit_code == 0, result.output
+    assert "option 'my_option' is deprecated" in result.output
+
+    if isinstance(deprecated, str):
+        assert deprecated in result.output
+
+
+def test_deprecated_required(runner):
+    with pytest.raises(ValueError, match="is deprecated and still required"):
+        click.Option(["--a"], required=True, deprecated=True)
+
+
+def test_deprecated_prompt(runner):
+    with pytest.raises(ValueError, match="`deprecated` options cannot use `prompt`"):
+        click.Option(["--a"], prompt=True, deprecated=True)
+
+
+def test_invalid_nargs(runner):
+    with pytest.raises(TypeError, match="nargs=-1 is not supported for options."):
+
+        @click.command()
+        @click.option("--foo", nargs=-1)
+        def cli(foo):
+            pass
+
+
+def test_nargs_tup_composite_mult(runner):
+    @click.command()
+    @click.option("--item", type=(str, int), multiple=True)
+    def copy(item):
+        for name, id in item:
+            click.echo(f"name={name} id={id:d}")
+
+    result = runner.invoke(copy, ["--item", "peter", "1", "--item", "max", "2"])
+    assert not result.exception
+    assert result.output.splitlines() == ["name=peter id=1", "name=max id=2"]
+
+
+def test_counting(runner):
+    @click.command()
+    @click.option("-v", count=True, help="Verbosity", type=click.IntRange(0, 3))
+    def cli(v):
+        click.echo(f"verbosity={v:d}")
+
+    result = runner.invoke(cli, ["-vvv"])
+    assert not result.exception
+    assert result.output == "verbosity=3\n"
+
+    result = runner.invoke(cli, ["-vvvv"])
+    assert result.exception
+    assert "Invalid value for '-v': 4 is not in the range 0<=x<=3." in result.output
 
     result = runner.invoke(cli, [])
-    assert result.stdout_bytes == b"\xf6\n"
+    assert not result.exception
+    assert result.output == "verbosity=0\n"
 
-    # Ensure we do not strip for bytes.
-    with runner.isolation() as outstreams:
-        click.echo(bytearray(b"\x1b[31mx\x1b[39m"), nl=False)
-        assert outstreams[0].getvalue() == b"\x1b[31mx\x1b[39m"
-
-
-def test_echo_custom_file():
-    f = StringIO()
-    click.echo("hello", file=f)
-    assert f.getvalue() == "hello\n"
+    result = runner.invoke(cli, ["--help"])
+    assert re.search(r"-v\s+Verbosity", result.output) is not None
 
 
-def test_echo_no_streams(monkeypatch, runner):
-    """echo should not fail when stdout and stderr are None with pythonw on Windows."""
-    with runner.isolation():
-        sys.stdout = None
-        sys.stderr = None
-        click.echo("test")
-        click.echo("test", err=True)
+@pytest.mark.parametrize("unknown_flag", ["--foo", "-f"])
+def test_unknown_options(runner, unknown_flag):
+    @click.command()
+    def cli():
+        pass
+
+    result = runner.invoke(cli, [unknown_flag])
+    assert result.exception
+    assert f"No such option '{unknown_flag}'." in result.output
 
 
 @pytest.mark.parametrize(
-    ("styles", "ref"),
+    ("value", "expect"),
     [
-        ({"fg": "black"}, "\x1b[30mx y\x1b[0m"),
-        ({"fg": "red"}, "\x1b[31mx y\x1b[0m"),
-        ({"fg": "green"}, "\x1b[32mx y\x1b[0m"),
-        ({"fg": "yellow"}, "\x1b[33mx y\x1b[0m"),
-        ({"fg": "blue"}, "\x1b[34mx y\x1b[0m"),
-        ({"fg": "magenta"}, "\x1b[35mx y\x1b[0m"),
-        ({"fg": "cyan"}, "\x1b[36mx y\x1b[0m"),
-        ({"fg": "white"}, "\x1b[37mx y\x1b[0m"),
-        ({"bg": "black"}, "\x1b[40mx y\x1b[0m"),
-        ({"bg": "red"}, "\x1b[41mx y\x1b[0m"),
-        ({"bg": "green"}, "\x1b[42mx y\x1b[0m"),
-        ({"bg": "yellow"}, "\x1b[43mx y\x1b[0m"),
-        ({"bg": "blue"}, "\x1b[44mx y\x1b[0m"),
-        ({"bg": "magenta"}, "\x1b[45mx y\x1b[0m"),
-        ({"bg": "cyan"}, "\x1b[46mx y\x1b[0m"),
-        ({"bg": "white"}, "\x1b[47mx y\x1b[0m"),
-        ({"bg": 91}, "\x1b[48;5;91mx y\x1b[0m"),
-        ({"bg": (135, 0, 175)}, "\x1b[48;2;135;0;175mx y\x1b[0m"),
-        ({"bold": True}, "\x1b[1mx y\x1b[0m"),
-        ({"dim": True}, "\x1b[2mx y\x1b[0m"),
-        ({"underline": True}, "\x1b[4mx y\x1b[0m"),
-        ({"overline": True}, "\x1b[53mx y\x1b[0m"),
-        ({"italic": True}, "\x1b[3mx y\x1b[0m"),
-        ({"blink": True}, "\x1b[5mx y\x1b[0m"),
-        ({"reverse": True}, "\x1b[7mx y\x1b[0m"),
-        ({"strikethrough": True}, "\x1b[9mx y\x1b[0m"),
-        ({"bold": False}, "\x1b[22mx y\x1b[0m"),
-        ({"dim": False}, "\x1b[22mx y\x1b[0m"),
-        ({"underline": False}, "\x1b[24mx y\x1b[0m"),
-        ({"overline": False}, "\x1b[55mx y\x1b[0m"),
-        ({"italic": False}, "\x1b[23mx y\x1b[0m"),
-        ({"blink": False}, "\x1b[25mx y\x1b[0m"),
-        ({"reverse": False}, "\x1b[27mx y\x1b[0m"),
-        ({"strikethrough": False}, "\x1b[29mx y\x1b[0m"),
-        ({"fg": "black", "reset": False}, "\x1b[30mx y"),
+        ("--cat", "Did you mean '--count'?"),
+        ("--bounds", "(Did you mean one of: '--bound', '--count'?)"),
+        ("--bount", "(Did you mean one of: '--bound', '--count'?)"),
     ],
 )
-def test_styling(styles, ref):
-    assert click.style("x y", **styles) == ref
-    assert click.unstyle(ref) == "x y"
-
-
-@pytest.mark.parametrize(("text", "expect"), [("\x1b[?25lx y\x1b[?25h", "x y")])
-def test_unstyle_other_ansi(text, expect):
-    assert click.unstyle(text) == expect
-
-
-def test_filename_formatting():
-    assert click.format_filename(b"foo.txt") == "foo.txt"
-    assert click.format_filename(b"/x/foo.txt") == "/x/foo.txt"
-    assert click.format_filename("/x/foo.txt") == "/x/foo.txt"
-    assert click.format_filename("/x/foo.txt", shorten=True) == "foo.txt"
-    assert click.format_filename("/x/\ufffd.txt", shorten=True) == "�.txt"
-
-
-def test_prompts(runner):
-    @click.command()
-    def test():
-        if click.confirm("Foo"):
-            click.echo("yes!")
-        else:
-            click.echo("no :(")
-
-    result = runner.invoke(test, input="y\n")
-    assert not result.exception
-    assert result.output == "Foo [y/N]: y\nyes!\n"
-
-    result = runner.invoke(test, input="\n")
-    assert not result.exception
-    assert result.output == "Foo [y/N]: \nno :(\n"
-
-    result = runner.invoke(test, input="n\n")
-    assert not result.exception
-    assert result.output == "Foo [y/N]: n\nno :(\n"
-
-    @click.command()
-    def test_no():
-        if click.confirm("Foo", default=True):
-            click.echo("yes!")
-        else:
-            click.echo("no :(")
-
-    result = runner.invoke(test_no, input="y\n")
-    assert not result.exception
-    assert result.output == "Foo [Y/n]: y\nyes!\n"
-
-    result = runner.invoke(test_no, input="\n")
-    assert not result.exception
-    assert result.output == "Foo [Y/n]: \nyes!\n"
-
-    result = runner.invoke(test_no, input="n\n")
-    assert not result.exception
-    assert result.output == "Foo [Y/n]: n\nno :(\n"
-
-
-def test_confirm_repeat(runner):
+def test_suggest_possible_options(runner, value, expect):
     cli = click.Command(
-        "cli", params=[click.Option(["--a/--no-a"], default=None, prompt=True)]
+        "cli", params=[click.Option(["--bound"]), click.Option(["--count"])]
     )
-    result = runner.invoke(cli, input="\ny\n")
-    assert result.output == "A [y/n]: \nError: invalid input\nA [y/n]: y\n"
+    result = runner.invoke(cli, [value])
+    assert expect in result.output
 
 
-@pytest.mark.skipif(WIN, reason="Different behavior on windows.")
-def test_prompts_abort(monkeypatch, capsys):
-    def f(_):
-        raise KeyboardInterrupt()
+def test_multiple_required(runner):
+    @click.command()
+    @click.option("-m", "--message", multiple=True, required=True)
+    def cli(message):
+        click.echo("\n".join(message))
 
-    monkeypatch.setattr("click.termui.hidden_prompt_func", f)
+    result = runner.invoke(cli, ["-m", "foo", "-mbar"])
+    assert not result.exception
+    assert result.output == "foo\nbar\n"
 
+    result = runner.invoke(cli, [])
+    assert result.exception
+    assert "Error: Missing option '-m' / '--message'." in result.output
+
+
+@pytest.mark.parametrize(
+    ("multiple", "nargs", "default", "expected"),
+    [
+        # If multiple values are allowed, defaults should be iterable.
+        (True, 1, [], ()),
+        (True, 1, (), ()),
+        (True, 1, tuple(), ()),
+        (True, 1, set(), ()),
+        (True, 1, frozenset(), ()),
+        (True, 1, {}, ()),
+        # Special values.
+        (True, 1, None, ()),
+        (True, 1, UNSET, ()),
+        # Number of values are kept as-is in the default.
+        (True, 1, [1], (1,)),
+        (True, 1, [1, 2], (1, 2)),
+        (True, 1, [1, 2, 3], (1, 2, 3)),
+        (True, 1, [1.1, 2.2], (1.1, 2.2)),
+        (True, 1, ["1", "2"], ("1", "2")),
+        (True, 1, [None, None], (None, None)),
+        # Contrary to list or tuples, native Python types not supported by Click are
+        # not recognized and are converted to the default format: tuple of strings.
+        # Refs: https://github.com/pallets/click/issues/3036
+        (True, 1, {1, 2}, ("1", "2")),
+        (True, 1, frozenset([1, 2]), ("1", "2")),
+        (True, 1, {1: "a", 2: "b"}, ("1", "2")),
+        # Multiple values with nargs > 1.
+        (True, 2, [], ()),
+        (True, 2, (), ()),
+        (True, 2, tuple(), ()),
+        (True, 2, set(), ()),
+        (True, 2, frozenset(), ()),
+        (True, 2, {}, ()),
+        (True, 2, None, ()),
+        (True, 2, UNSET, ()),
+        (True, 2, [[1, 2]], ((1, 2),)),
+        (True, 2, [[1, 2], [3, 4]], ((1, 2), (3, 4))),
+        (True, 2, [[1, 2], [3, 4], [5, 6]], ((1, 2), (3, 4), (5, 6))),
+        (True, 2, [[1.1, 2.2], [3.3, 4.4]], ((1.1, 2.2), (3.3, 4.4))),
+        (True, 2, [["1", "2"], ["3", "4"]], (("1", "2"), ("3", "4"))),
+        (True, 2, [[None, None], [None, None]], ((None, None), (None, None))),
+        (True, 2, [[1, 2.2], ["3", None]], ((1, 2.2), (3, None))),
+        (True, 2, [[1, 2.2], None], ((1, 2.2), None)),
+        # Default of the right length works for non-multiples.
+        (False, 2, [1, 2], (1, 2)),
+    ],
+)
+def test_good_defaults_for_multiple(runner, multiple, nargs, default, expected):
+    """Comprehensive check of default-value processing for options with
+    ``multiple=True`` and/or ``nargs > 1``.
+
+    .. hint::
+        An argument-specific equivalent is in
+        ``test_arguments.py::test_good_defaults_for_nargs``.
+
+        Smoke tests are in ``test_defaults.py``:
+        ``test_multiple_defaults`` (explicit ``type=FLOAT``)
+        and ``test_nargs_plus_multiple`` (``nargs=2``).
+    """
+
+    @click.command()
+    @click.option("-a", multiple=multiple, nargs=nargs, default=default)
+    def cmd(a):
+        click.echo(repr(a), nl=False)
+
+    result = runner.invoke(cmd)
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("multiple", "nargs", "default", "exception", "message"),
+    [
+        # Non-iterables defaults.
+        (
+            True,
+            1,
+            "Yo",
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            1,
+            "",
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            1,
+            True,
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            1,
+            False,
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            1,
+            12,
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            1,
+            7.9,
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            False,
+            2,
+            42,
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            2,
+            ["test string which is not a list in the list"],
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        # Multiple options, each with 2 args, but with wrong length.
+        (
+            True,
+            2,
+            (1,),
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            2,
+            (1, 2, 3),
+            None,
+            "Error: Invalid value for '-a': Value must be an iterable.",
+        ),
+        (
+            True,
+            2,
+            [tuple()],
+            ValueError,
+            r"'nargs' must be 0 \(or None\) for type <click\.types\.Tuple object at "
+            r"0x[0-9A-Fa-f]+>, but it was 2\.",
+        ),
+        (
+            True,
+            2,
+            [(1,)],
+            ValueError,
+            r"'nargs' must be 1 \(or None\) for type <click\.types\.Tuple object at "
+            r"0x[0-9A-Fa-f]+>, but it was 2\.",
+        ),
+        (
+            True,
+            2,
+            [(1, 2, 3)],
+            ValueError,
+            r"'nargs' must be 3 \(or None\) for type <click\.types\.Tuple object at "
+            r"0x[0-9A-Fa-f]+>, but it was 2\.",
+        ),
+        # A mix of valid and invalid defaults.
+        (
+            True,
+            2,
+            [[1, 2.2], []],
+            None,
+            "Error: Invalid value for '-a': 2 values are required, but 0 were given.",
+        ),
+        # Default values that are iterable but not of the right length.
+        (
+            False,
+            2,
+            [1],
+            None,
+            "Error: Invalid value for '-a': Takes 2 values but 1 was given.",
+        ),
+        (
+            True,
+            2,
+            [[1]],
+            ValueError,
+            r"'nargs' must be 1 \(or None\) for type <click\.types\.Tuple object at "
+            r"0x[0-9A-Fa-f]+>, but it was 2\.",
+        ),
+    ],
+)
+def test_bad_defaults_for_multiple(
+    runner, multiple, nargs, default, exception, message
+):
+    if exception:
+        assert issubclass(exception, Exception)
+    else:
+        assert exception is None
+
+    with (
+        pytest.raises(exception, match=re.compile(message))
+        if exception
+        else nullcontext()
+    ):
+
+        @click.command()
+        @click.option("-a", multiple=multiple, nargs=nargs, default=default)
+        def cmd(a):
+            click.echo(repr(a))
+
+        result = runner.invoke(cmd)
+        assert message in result.stderr
+
+
+@pytest.mark.parametrize("env_key", ["MYPATH", "AUTO_MYPATH"])
+def test_empty_envvar(runner, env_key):
+    @click.command()
+    @click.option("--mypath", type=click.Path(exists=True), envvar="MYPATH")
+    def cli(mypath):
+        click.echo(f"mypath: {mypath}")
+
+    result = runner.invoke(cli, env={env_key: ""}, auto_envvar_prefix="AUTO")
+    assert result.exception is None
+    assert result.output == "mypath: None\n"
+
+
+def test_multiple_envvar(runner):
+    @click.command()
+    @click.option("--arg", multiple=True)
+    def cmd(arg):
+        click.echo("|".join(arg))
+
+    result = runner.invoke(
+        cmd, [], auto_envvar_prefix="TEST", env={"TEST_ARG": "foo bar baz"}
+    )
+    assert not result.exception
+    assert result.output == "foo|bar|baz\n"
+
+    @click.command()
+    @click.option("--arg", multiple=True, envvar="X")
+    def cmd(arg):
+        click.echo("|".join(arg))
+
+    result = runner.invoke(cmd, [], env={"X": "foo bar baz"})
+    assert not result.exception
+    assert result.output == "foo|bar|baz\n"
+
+    @click.command()
+    @click.option("--arg", multiple=True, type=click.Path())
+    def cmd(arg):
+        click.echo("|".join(arg))
+
+    result = runner.invoke(
+        cmd,
+        [],
+        auto_envvar_prefix="TEST",
+        env={"TEST_ARG": f"foo{os.path.pathsep}bar"},
+    )
+    assert not result.exception
+    assert result.output == "foo|bar\n"
+
+
+@pytest.mark.parametrize(
+    ("envvar_name", "envvar_value", "expected"),
+    (
+        # Lower-cased variations of value.
+        ("SHOUT", "true", True),
+        ("SHOUT", "false", False),
+        # Title-cased variations of value.
+        ("SHOUT", "True", True),
+        ("SHOUT", "False", False),
+        # Upper-cased variations of value.
+        ("SHOUT", "TRUE", True),
+        ("SHOUT", "FALSE", False),
+        # Random-cased variations of value.
+        ("SHOUT", "TruE", True),
+        ("SHOUT", "truE", True),
+        ("SHOUT", "FaLsE", False),
+        ("SHOUT", "falsE", False),
+        # Extra spaces around the value.
+        ("SHOUT", "true    ", True),
+        ("SHOUT", "  true  ", True),
+        ("SHOUT", "    true", True),
+        ("SHOUT", "false   ", False),
+        ("SHOUT", "  false ", False),
+        ("SHOUT", "   false", False),
+        # Integer variations.
+        ("SHOUT", "1", True),
+        ("SHOUT", "0", False),
+        # Alternative states.
+        ("SHOUT", "t", True),
+        ("SHOUT", "T", True),
+        ("SHOUT", "  T  ", True),
+        ("SHOUT", "f", False),
+        ("SHOUT", "y", True),
+        ("SHOUT", "n", False),
+        ("SHOUT", "yes", True),
+        ("SHOUT", "no", False),
+        ("SHOUT", "on", True),
+        ("SHOUT", "off", False),
+        # Blank value variations.
+        ("SHOUT", None, False),
+        ("SHOUT", "", False),
+        ("SHOUT", " ", False),
+        ("SHOUT", "       ", False),
+        # Variable names are not stripped of spaces and so don't match the
+        # flag, which then naturraly takes its default value.
+        ("SHOUT    ", "True", False),
+        ("SHOUT    ", "False", False),
+        ("  SHOUT  ", "True", False),
+        ("  SHOUT  ", "False", False),
+        ("    SHOUT", "True", False),
+        ("    SHOUT", "False", False),
+        ("SH    OUT", "True", False),
+        ("SH    OUT", "False", False),
+        # Same for random and reverse environment variable names: they are not
+        # recognized by the option.
+        ("RANDOM", "True", False),
+        ("NO_SHOUT", "True", False),
+        ("NO_SHOUT", "False", False),
+        ("NOSHOUT", "True", False),
+        ("NOSHOUT", "False", False),
+    ),
+)
+def test_boolean_flag_envvar(runner, envvar_name, envvar_value, expected):
+    assert isinstance(envvar_name, str)
+    assert isinstance(envvar_value, str) or envvar_value is None
+
+    @click.command()
+    @click.option("--shout/--no-shout", envvar="SHOUT")
+    def cli(shout):
+        click.echo(repr(shout), nl=False)
+
+    result = runner.invoke(cli, [], env={envvar_name: envvar_value})
+    assert result.exit_code == 0
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        # Extra spaces inside the value.
+        "tr ue",  # codespell:ignore ue
+        "fa lse",
+        # Numbers.
+        "10",
+        "01",
+        "00",
+        "11",
+        "0.0",
+        "1.1",
+        # Random strings.
+        "randomstring",
+        "None",
+        "'None'",
+        "A B",
+        " 1 2 ",
+        "9.3",
+        "a;n",
+        "x:y",
+        "i/o",
+    ),
+)
+def test_boolean_envvar_bad_values(runner, value):
+    @click.command()
+    @click.option("--shout/--no-shout", envvar="SHOUT")
+    def cli(shout):
+        click.echo(shout)
+
+    result = runner.invoke(cli, [], env={"SHOUT": value})
+    assert result.exit_code == 2
+    assert (
+        f"Invalid value for '--shout': {value!r} is not a valid boolean."
+        in result.output
+    )
+
+
+def test_multiple_default_help(runner):
+    @click.command()
+    @click.option("--arg1", multiple=True, default=("foo", "bar"), show_default=True)
+    @click.option("--arg2", multiple=True, default=(1, 2), type=int, show_default=True)
+    def cmd(arg, arg2):
+        pass
+
+    result = runner.invoke(cmd, ["--help"])
+    assert not result.exception
+    assert "foo, bar" in result.output
+    assert "1, 2" in result.output
+
+
+def test_show_default_default_map(runner):
+    @click.command()
+    @click.option("--arg", default="a", show_default=True)
+    def cmd(arg):
+        click.echo(arg)
+
+    result = runner.invoke(cmd, ["--help"], default_map={"arg": "b"})
+
+    assert not result.exception
+    assert "[default: b]" in result.output
+
+
+def test_multiple_default_type():
+    opt = click.Option(["-a"], multiple=True, default=(1, 2))
+    assert opt.nargs == 1
+    assert opt.multiple
+    assert opt.type is click.INT
+    ctx = click.Context(click.Command("test"))
+    assert opt.get_default(ctx) == (1, 2)
+
+
+def test_multiple_default_composite_type():
+    opt = click.Option(["-a"], multiple=True, default=[(1, "a")])
+    assert opt.nargs == 2
+    assert opt.multiple
+    assert isinstance(opt.type, click.Tuple)
+    assert opt.type.types == [click.INT, click.STRING]
+    ctx = click.Context(click.Command("test"))
+    assert opt.type_cast_value(ctx, opt.get_default(ctx)) == ((1, "a"),)
+
+
+def test_parse_multiple_default_composite_type(runner):
+    @click.command()
+    @click.option("-a", multiple=True, default=("a", "b"))
+    @click.option("-b", multiple=True, default=[(1, "a")])
+    def cmd(a, b):
+        click.echo(a)
+        click.echo(b)
+
+    # result = runner.invoke(cmd, "-a c -a 1 -a d -b 2 two -b 4 four".split())
+    # assert result.output == "('c', '1', 'd')\n((2, 'two'), (4, 'four'))\n"
+    result = runner.invoke(cmd)
+    assert result.output == "('a', 'b')\n((1, 'a'),)\n"
+
+
+def test_dynamic_default_help_unset(runner):
+    @click.command()
+    @click.option(
+        "--username",
+        prompt=True,
+        default=lambda: os.environ.get("USER", ""),
+        show_default=True,
+    )
+    def cmd(username):
+        print("Hello,", username)
+
+    result = runner.invoke(cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "--username" in result.output
+    assert "lambda" not in result.output
+    assert "(dynamic)" in result.output
+
+
+def test_dynamic_default_help_text(runner):
+    @click.command()
+    @click.option(
+        "--username",
+        prompt=True,
+        default=lambda: os.environ.get("USER", ""),
+        show_default="current user",
+    )
+    def cmd(username):
+        print("Hello,", username)
+
+    result = runner.invoke(cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "--username" in result.output
+    assert "lambda" not in result.output
+    assert "(current user)" in result.output
+
+
+def test_dynamic_default_help_special_method(runner):
+    class Value:
+        def __call__(self):
+            return 42
+
+        def __str__(self):
+            return "special value"
+
+    opt = click.Option(["-a"], default=Value(), show_default=True)
+    ctx = click.Context(click.Command("cli"))
+    assert opt.get_help_extra(ctx) == {"default": "special value"}
+    assert "special value" in opt.get_help_record(ctx)[1]
+
+
+@pytest.mark.parametrize(
+    ("type", "expect"),
+    [
+        (click.IntRange(1, 32), "1<=x<=32"),
+        (click.IntRange(1, 32, min_open=True, max_open=True), "1<x<32"),
+        (click.IntRange(1), "x>=1"),
+        (click.IntRange(max=32), "x<=32"),
+    ],
+)
+def test_intrange_default_help_text(type, expect):
+    option = click.Option(["--num"], type=type, show_default=True, default=2)
+    context = click.Context(click.Command("test"))
+    assert option.get_help_extra(context) == {"default": "2", "range": expect}
+    result = option.get_help_record(context)[1]
+    assert expect in result
+
+
+def test_count_default_type_help():
+    """A count option with the default type should not show >=0 in help."""
+    option = click.Option(["--count"], count=True, help="some words")
+    context = click.Context(click.Command("test"))
+    assert option.get_help_extra(context) == {}
+    result = option.get_help_record(context)[1]
+    assert result == "some words"
+
+
+def test_file_type_help_default():
+    """The default for a File type is a filename string. The string
+    should be displayed in help, not an open file object.
+
+    Type casting is only applied to defaults in processing, not when
+    getting the default value.
+    """
+    option = click.Option(
+        ["--in"], type=click.File(), default=__file__, show_default=True
+    )
+    context = click.Context(click.Command("test"))
+    assert option.get_help_extra(context) == {"default": __file__}
+    result = option.get_help_record(context)[1]
+    assert __file__ in result
+
+
+def test_toupper_envvar_prefix(runner):
+    @click.command()
+    @click.option("--arg")
+    def cmd(arg):
+        click.echo(arg)
+
+    result = runner.invoke(cmd, [], auto_envvar_prefix="test", env={"TEST_ARG": "foo"})
+    assert not result.exception
+    assert result.output == "foo\n"
+
+
+def test_nargs_envvar(runner):
+    @click.command()
+    @click.option("--arg", nargs=2)
+    def cmd(arg):
+        click.echo("|".join(arg))
+
+    result = runner.invoke(
+        cmd, [], auto_envvar_prefix="TEST", env={"TEST_ARG": "foo bar"}
+    )
+    assert not result.exception
+    assert result.output == "foo|bar\n"
+
+    @click.command()
+    @click.option("--arg", nargs=2, multiple=True)
+    def cmd(arg):
+        for item in arg:
+            click.echo("|".join(item))
+
+    result = runner.invoke(
+        cmd, [], auto_envvar_prefix="TEST", env={"TEST_ARG": "x 1 y 2"}
+    )
+    assert not result.exception
+    assert result.output == "x|1\ny|2\n"
+
+
+def test_show_envvar(runner):
+    @click.command()
+    @click.option("--arg1", envvar="ARG1", show_envvar=True)
+    def cmd(arg):
+        pass
+
+    result = runner.invoke(cmd, ["--help"])
+    assert not result.exception
+    assert "ARG1" in result.output
+
+
+def test_show_envvar_auto_prefix(runner):
+    @click.command()
+    @click.option("--arg1", show_envvar=True)
+    def cmd(arg):
+        pass
+
+    result = runner.invoke(cmd, ["--help"], auto_envvar_prefix="TEST")
+    assert not result.exception
+    assert "TEST_ARG1" in result.output
+
+
+def test_show_envvar_auto_prefix_dash_in_command(runner):
+    @click.group()
+    def cli():
+        pass
+
+    @cli.command()
+    @click.option("--baz", show_envvar=True)
+    def foo_bar(baz):
+        pass
+
+    result = runner.invoke(cli, ["foo-bar", "--help"], auto_envvar_prefix="TEST")
+    assert not result.exception
+    assert "TEST_FOO_BAR_BAZ" in result.output
+
+
+def test_custom_validation(runner):
+    def validate_pos_int(ctx, param, value):
+        if value < 0:
+            raise click.BadParameter("Value needs to be positive")
+        return value
+
+    @click.command()
+    @click.option("--foo", callback=validate_pos_int, default=1)
+    def cmd(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd, ["--foo", "-1"])
+    assert "Invalid value for '--foo': Value needs to be positive" in result.output
+
+    result = runner.invoke(cmd, ["--foo", "42"])
+    assert result.output == "42\n"
+
+
+def test_callback_validates_prompt(runner, monkeypatch):
+    def validate(ctx, param, value):
+        if value < 0:
+            raise click.BadParameter("should be positive")
+
+        return value
+
+    @click.command()
+    @click.option("-a", type=int, callback=validate, prompt=True)
+    def cli(a):
+        click.echo(a)
+
+    result = runner.invoke(cli, input="-12\n60\n")
+    assert result.output == "A: -12\nError: should be positive\nA: 60\n60\n"
+
+
+def test_winstyle_options(runner):
+    @click.command()
+    @click.option("/debug;/no-debug", help="Enables or disables debug mode.")
+    def cmd(debug):
+        click.echo(debug)
+
+    result = runner.invoke(cmd, ["/debug"], help_option_names=["/?"])
+    assert result.output == "True\n"
+    result = runner.invoke(cmd, ["/no-debug"], help_option_names=["/?"])
+    assert result.output == "False\n"
+    result = runner.invoke(cmd, [], help_option_names=["/?"])
+    assert result.output == "False\n"
+    result = runner.invoke(cmd, ["/?"], help_option_names=["/?"])
+    assert "/debug; /no-debug  Enables or disables debug mode." in result.output
+    assert "/?                 Show this message and exit." in result.output
+
+
+def test_legacy_options(runner):
+    @click.command()
+    @click.option("-whatever")
+    def cmd(whatever):
+        click.echo(whatever)
+
+    result = runner.invoke(cmd, ["-whatever", "42"])
+    assert result.output == "42\n"
+    result = runner.invoke(cmd, ["-whatever=23"])
+    assert result.output == "23\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "expect_missing", "processed_value"),
+    [
+        (UNSET, True, None),
+        (None, False, None),
+        # Default type of the argument is str, so everything is processed as strings.
+        ("", False, ""),
+        ("  ", False, "  "),
+        ("foo", False, "foo"),
+        ("12", False, "12"),
+        (12, False, "12"),
+        (12.1, False, "12.1"),
+        (list(), False, "[]"),
+        (tuple(), False, "()"),
+        (set(), False, "set()"),
+        (frozenset(), False, "frozenset()"),
+        (dict(), False, "{}"),
+    ],
+)
+def test_required_option(value, expect_missing, processed_value):
+    ctx = click.Context(click.Command(""))
+    argument = click.Option(["-a"], required=True)
+
+    if expect_missing:
+        with pytest.raises(click.MissingParameter) as excinfo:
+            argument.process_value(ctx, value)
+        assert str(excinfo.value) == "Missing parameter: a"
+
+    else:
+        value = argument.process_value(ctx, value)
+        assert value == processed_value
+
+
+def test_missing_required_flag(runner):
+    cli = click.Command(
+        "cli", params=[click.Option(["--on/--off"], is_flag=True, required=True)]
+    )
+    result = runner.invoke(cli)
+    assert result.exit_code == 2
+    assert "Error: Missing option '--on'." in result.output
+
+
+def test_missing_choice(runner):
+    @click.command()
+    @click.option("--foo", type=click.Choice(["foo", "bar"]), required=True)
+    def cmd(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd)
+    assert result.exit_code == 2
+    error, separator, choices = result.output.partition("Choose from")
+    assert "Error: Missing option '--foo'. " in error
+    assert "Choose from" in separator
+    assert "foo" in choices
+    assert "bar" in choices
+
+
+def test_missing_envvar(runner):
+    cli = click.Command(
+        "cli", params=[click.Option(["--foo"], envvar="bar", required=True)]
+    )
+    result = runner.invoke(cli)
+    assert result.exit_code == 2
+    assert "Error: Missing option '--foo'." in result.output
+    cli = click.Command(
+        "cli",
+        params=[click.Option(["--foo"], envvar="bar", show_envvar=True, required=True)],
+    )
+    result = runner.invoke(cli)
+    assert result.exit_code == 2
+    assert "Error: Missing option '--foo' (env var: 'bar')." in result.output
+
+    cli = click.Command(
+        "cli", params=[click.Option(["--foo"], show_envvar=True, required=True)]
+    )
+    result = runner.invoke(cli)
+    assert result.exit_code == 2
+    assert "Error: Missing option '--foo'." in result.output
+
+
+def test_case_insensitive_choice(runner):
+    @click.command()
+    @click.option("--foo", type=click.Choice(["Orange", "Apple"], case_sensitive=False))
+    def cmd(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd, ["--foo", "apple"])
+    assert result.exit_code == 0
+    assert result.output == "Apple\n"
+
+    result = runner.invoke(cmd, ["--foo", "oRANGe"])
+    assert result.exit_code == 0
+    assert result.output == "Orange\n"
+
+    result = runner.invoke(cmd, ["--foo", "Apple"])
+    assert result.exit_code == 0
+    assert result.output == "Apple\n"
+
+    @click.command()
+    @click.option("--foo", type=click.Choice(["Orange", "Apple"]))
+    def cmd2(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd2, ["--foo", "apple"])
+    assert result.exit_code == 2
+
+    result = runner.invoke(cmd2, ["--foo", "oRANGe"])
+    assert result.exit_code == 2
+
+    result = runner.invoke(cmd2, ["--foo", "Apple"])
+    assert result.exit_code == 0
+
+
+def test_case_insensitive_choice_returned_exactly(runner):
+    @click.command()
+    @click.option("--foo", type=click.Choice(["Orange", "Apple"], case_sensitive=False))
+    def cmd(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd, ["--foo", "apple"])
+    assert result.exit_code == 0
+    assert result.output == "Apple\n"
+
+
+def test_option_help_preserve_paragraphs(runner):
+    @click.command()
+    @click.option(
+        "-C",
+        "--config",
+        type=click.Path(),
+        help="""Configuration file to use.
+
+        If not given, the environment variable CONFIG_FILE is consulted
+        and used if set. If neither are given, a default configuration
+        file is loaded.""",
+    )
+    def cmd(config):
+        pass
+
+    result = runner.invoke(cmd, ["--help"])
+    assert result.exit_code == 0
+    i = " " * 21
+    assert (
+        "  -C, --config PATH  Configuration file to use.\n"
+        f"{i}\n"
+        f"{i}If not given, the environment variable CONFIG_FILE is\n"
+        f"{i}consulted and used if set. If neither are given, a default\n"
+        f"{i}configuration file is loaded."
+    ) in result.output
+
+
+def test_argument_custom_class(runner):
+    class CustomArgument(click.Argument):
+        def get_default(self, ctx, call=True):
+            """a dumb override of a default value for testing"""
+            return "I am a default"
+
+    @click.command()
+    @click.argument("testarg", cls=CustomArgument, default="you won't see me")
+    def cmd(testarg):
+        click.echo(testarg)
+
+    result = runner.invoke(cmd)
+    assert "I am a default" in result.output
+    assert "you won't see me" not in result.output
+
+
+def test_option_custom_class(runner):
+    class CustomOption(click.Option):
+        def get_help_record(self, ctx):
+            """a dumb override of a help text for testing"""
+            return ("--help", "I am a help text")
+
+    @click.command()
+    @click.option("--testoption", cls=CustomOption, help="you won't see me")
+    def cmd(testoption):
+        click.echo(testoption)
+
+    result = runner.invoke(cmd, ["--help"])
+    assert "I am a help text" in result.output
+    assert "you won't see me" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("param_decl", "option_kwargs", "pass_argv"),
+    (
+        # there is a large potential parameter space to explore here
+        # this is just a very small sample of it
+        ("--opt", {}, []),
+        ("--opt", {"multiple": True}, []),
+        ("--opt", {"is_flag": True}, []),
+        ("--opt/--no-opt", {"is_flag": True, "default": None}, []),
+        ("--req", {"is_flag": True, "required": True}, ["--req"]),
+    ),
+)
+def test_option_custom_class_can_override_type_cast_value_and_never_sees_unset(
+    runner, param_decl, option_kwargs, pass_argv
+):
+    """
+    Test that overriding type_cast_value is supported
+
+    In particular, the option is never passed an UNSET sentinel value.
+    """
+
+    class CustomOption(click.Option):
+        def type_cast_value(self, ctx, value):
+            assert value is not UNSET
+            return value
+
+    @click.command()
+    @click.option("myparam", param_decl, **option_kwargs, cls=CustomOption)
+    def cmd(myparam):
+        click.echo("ok")
+
+    result = runner.invoke(cmd, pass_argv)
+    assert not result.exception
+    assert result.exit_code == 0
+
+
+def test_option_custom_class_reusable(runner):
+    """Ensure we can reuse a custom class option. See Issue #926"""
+
+    class CustomOption(click.Option):
+        def get_help_record(self, ctx):
+            """a dumb override of a help text for testing"""
+            return ("--help", "I am a help text")
+
+    # Assign to a variable to reuse the decorator.
+    testoption = click.option("--testoption", cls=CustomOption, help="you won't see me")
+
+    @click.command()
+    @testoption
+    def cmd1(testoption):
+        click.echo(testoption)
+
+    @click.command()
+    @testoption
+    def cmd2(testoption):
+        click.echo(testoption)
+
+    # Both of the commands should have the --help option now.
+    for cmd in (cmd1, cmd2):
+        result = runner.invoke(cmd, ["--help"])
+        assert "I am a help text" in result.output
+        assert "you won't see me" not in result.output
+
+
+@pytest.mark.parametrize("custom_class", (True, False))
+@pytest.mark.parametrize(
+    ("name_specs", "expected"),
+    (
+        (
+            ("-h", "--help"),
+            "  -h, --help  Show this message and exit.\n",
+        ),
+        (
+            ("-h",),
+            "  -h      Show this message and exit.\n"
+            "  --help  Show this message and exit.\n",
+        ),
+        (
+            ("--help",),
+            "  --help  Show this message and exit.\n",
+        ),
+    ),
+)
+def test_help_option_custom_names_and_class(runner, custom_class, name_specs, expected):
+    class CustomHelpOption(click.Option):
+        pass
+
+    option_attrs = {}
+    if custom_class:
+        option_attrs["cls"] = CustomHelpOption
+
+    @click.command()
+    @click.help_option(*name_specs, **option_attrs)
+    def cmd():
+        pass
+
+    for arg in name_specs:
+        result = runner.invoke(cmd, [arg])
+        assert not result.exception
+        assert result.exit_code == 0
+        assert expected in result.output
+
+
+def test_bool_flag_with_type(runner):
+    @click.command()
+    @click.option("--shout/--no-shout", default=False, type=bool)
+    def cmd(shout):
+        pass
+
+    result = runner.invoke(cmd)
+    assert not result.exception
+
+
+def test_aliases_for_flags(runner):
+    @click.command()
+    @click.option("--warnings/--no-warnings", " /-W", default=True)
+    def cli(warnings):
+        click.echo(warnings)
+
+    result = runner.invoke(cli, ["--warnings"])
+    assert result.output == "True\n"
+    result = runner.invoke(cli, ["--no-warnings"])
+    assert result.output == "False\n"
+    result = runner.invoke(cli, ["-W"])
+    assert result.output == "False\n"
+
+    @click.command()
+    @click.option("--warnings/--no-warnings", "-w", default=True)
+    def cli_alt(warnings):
+        click.echo(warnings)
+
+    result = runner.invoke(cli_alt, ["--warnings"])
+    assert result.output == "True\n"
+    result = runner.invoke(cli_alt, ["--no-warnings"])
+    assert result.output == "False\n"
+    result = runner.invoke(cli_alt, ["-w"])
+    assert result.output == "True\n"
+
+
+@pytest.mark.parametrize(
+    "option_args,expected",
+    [
+        (["--aggressive", "--all", "-a"], "aggressive"),
+        (["--first", "--second", "--third", "-a", "-b", "-c"], "first"),
+        (["--apple", "--banana", "--cantaloupe", "-a", "-b", "-c"], "apple"),
+        (["--cantaloupe", "--banana", "--apple", "-c", "-b", "-a"], "cantaloupe"),
+        (["-a", "-b", "-c"], "a"),
+        (["-c", "-b", "-a"], "c"),
+        (["-a", "--apple", "-b", "--banana", "-c", "--cantaloupe"], "apple"),
+        (["-c", "-a", "--cantaloupe", "-b", "--banana", "--apple"], "cantaloupe"),
+        (["--from", "-f", "_from"], "_from"),
+        (["--return", "-r", "_ret"], "_ret"),
+    ],
+)
+def test_option_names(runner, option_args, expected):
+    @click.command()
+    @click.option(*option_args, is_flag=True)
+    def cmd(**kwargs):
+        click.echo(str(kwargs[expected]))
+
+    assert cmd.params[0].name == expected
+
+    for form in option_args:
+        if form.startswith("-"):
+            result = runner.invoke(cmd, [form])
+            assert result.output == "True\n"
+
+
+def test_flag_duplicate_names(runner):
+    with pytest.raises(ValueError, match="cannot use the same flag for true/false"):
+        click.Option(["--foo/--foo"], default=False)
+
+
+@pytest.mark.parametrize(("default", "expect"), [(False, "no-cache"), (True, "cache")])
+def test_show_default_boolean_flag_name(runner, default, expect):
+    """When a boolean flag has distinct True/False opts, it should show
+    the default opt name instead of the default value. It should only
+    show one name even if multiple are declared.
+    """
+    opt = click.Option(
+        ("--cache/--no-cache", "--c/--nc"),
+        default=default,
+        show_default=True,
+        help="Enable/Disable the cache.",
+    )
+    ctx = click.Context(click.Command("test"))
+    assert opt.get_help_extra(ctx) == {"default": expect}
+    message = opt.get_help_record(ctx)[1]
+    assert f"[default: {expect}]" in message
+
+
+def test_show_true_default_boolean_flag_value(runner):
+    """When a boolean flag only has one opt and its default is True,
+    it will show the default value, not the opt name.
+    """
+    opt = click.Option(
+        ("--cache",),
+        is_flag=True,
+        show_default=True,
+        default=True,
+        help="Enable the cache.",
+    )
+    ctx = click.Context(click.Command("test"))
+    assert opt.get_help_extra(ctx) == {"default": "True"}
+    message = opt.get_help_record(ctx)[1]
+    assert "[default: True]" in message
+
+
+@pytest.mark.parametrize("default", [False, None])
+def test_hide_false_default_boolean_flag_value(runner, default):
+    """When a boolean flag only has one opt and its default is False or
+    None, it will not show the default
+    """
+    opt = click.Option(
+        ("--cache",),
+        is_flag=True,
+        show_default=True,
+        default=default,
+        help="Enable the cache.",
+    )
+    ctx = click.Context(click.Command("test"))
+    assert opt.get_help_extra(ctx) == {}
+    message = opt.get_help_record(ctx)[1]
+    assert "[default: " not in message
+
+
+def test_show_default_string(runner):
+    """When show_default is a string show that value as default."""
+    opt = click.Option(["--limit"], show_default="unlimited")
+    ctx = click.Context(click.Command("cli"))
+    assert opt.get_help_extra(ctx) == {"default": "(unlimited)"}
+    message = opt.get_help_record(ctx)[1]
+    assert "[default: (unlimited)]" in message
+
+
+def test_string_show_default_shows_custom_string_in_prompt(runner):
+    @click.command()
+    @click.option(
+        "--arg1", show_default="custom", prompt=True, default="my-default-value"
+    )
+    def cmd(arg1):
+        pass
+
+    result = runner.invoke(cmd, input="my-input", standalone_mode=False)
+    assert "(custom)" in result.output
+    assert "my-default-value" not in result.output
+
+
+class _StrictEq:
+    """Object whose ``__eq__`` raises on string comparison (like semver.Version)."""
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            raise ValueError("cannot compare to string")
+        return NotImplemented
+
+    def __str__(self):
+        return "strict"
+
+
+@pytest.mark.parametrize(
+    ("default", "expected"),
+    [
+        ("", '[default: ""]'),
+        (_StrictEq(), "[default: strict]"),
+    ],
+    ids=["empty-string", "non-string-comparable-object"],
+)
+def test_show_default_with_empty_string(runner, default, expected):
+    """The empty-string check in help rendering must not break on objects
+    whose ``__eq__`` raises for string operands.
+
+    Regression test for https://github.com/pallets/click/issues/3298.
+    """
+    opt = click.Option(["--limit"], default=default, show_default=True)
+    ctx = click.Context(click.Command("cli"))
+    message = opt.get_help_record(ctx)[1]
+    assert expected in message
+
+
+def test_do_not_show_no_default(runner):
+    """When show_default is True and no default is set do not show None."""
+    opt = click.Option(["--limit"], show_default=True)
+    ctx = click.Context(click.Command("cli"))
+    assert opt.get_help_extra(ctx) == {}
+    message = opt.get_help_record(ctx)[1]
+    assert "[default: None]" not in message
+
+
+def test_do_not_show_default_empty_multiple():
+    """When show_default is True and multiple=True is set, it should not
+    print empty default value in --help output.
+    """
+    opt = click.Option(["-a"], multiple=True, help="values", show_default=True)
+    ctx = click.Context(click.Command("cli"))
+    assert opt.get_help_extra(ctx) == {}
+    message = opt.get_help_record(ctx)[1]
+    assert message == "values"
+
+
+@pytest.mark.parametrize(
+    ("ctx_value", "opt_value", "extra_value", "expect"),
+    [
+        (None, None, {}, False),
+        (None, False, {}, False),
+        (None, True, {"default": "1"}, True),
+        (False, None, {}, False),
+        (False, False, {}, False),
+        (False, True, {"default": "1"}, True),
+        (True, None, {"default": "1"}, True),
+        (True, False, {}, False),
+        (True, True, {"default": "1"}, True),
+        (False, "one", {"default": "(one)"}, True),
+    ],
+)
+def test_show_default_precedence(ctx_value, opt_value, extra_value, expect):
+    ctx = click.Context(click.Command("test"), show_default=ctx_value)
+    opt = click.Option("-a", default=1, help="value", show_default=opt_value)
+    assert opt.get_help_extra(ctx) == extra_value
+    help = opt.get_help_record(ctx)[1]
+    assert ("default:" in help) is expect
+
+
+@pytest.mark.parametrize(
+    ("args", "expect"),
+    [
+        (None, (None, None, ())),
+        (["--opt"], ("flag", None, ())),
+        (["--opt", "-a", 42], ("flag", "42", ())),
+        (["--opt", "test", "-a", 42], ("test", "42", ())),
+        (["--opt=test", "-a", 42], ("test", "42", ())),
+        (["-o"], ("flag", None, ())),
+        (["-o", "-a", 42], ("flag", "42", ())),
+        (["-o", "test", "-a", 42], ("test", "42", ())),
+        (["-otest", "-a", 42], ("test", "42", ())),
+        (["a", "b", "c"], (None, None, ("a", "b", "c"))),
+        (["--opt", "a", "b", "c"], ("a", None, ("b", "c"))),
+        (["--opt", "test"], ("test", None, ())),
+        (["-otest", "a", "b", "c"], ("test", None, ("a", "b", "c"))),
+        (["--opt=test", "a", "b", "c"], ("test", None, ("a", "b", "c"))),
+    ],
+)
+def test_option_with_optional_value(runner, args, expect):
+    @click.command()
+    @click.option("-o", "--opt", is_flag=False, flag_value="flag")
+    @click.option("-a")
+    @click.argument("b", nargs=-1)
+    def cli(opt, a, b):
+        return opt, a, b
+
+    result = runner.invoke(cli, args, standalone_mode=False, catch_exceptions=False)
+    assert result.return_value == expect
+
+
+def test_multiple_option_with_optional_value(runner):
+    cli = click.Command(
+        "cli",
+        params=[
+            click.Option(["-f"], is_flag=False, flag_value="flag", multiple=True),
+            click.Option(["-a"]),
+            click.Argument(["b"], nargs=-1),
+        ],
+        callback=lambda **kwargs: kwargs,
+    )
+    result = runner.invoke(
+        cli,
+        ["-f", "-f", "other", "-f", "-a", "1", "a", "b"],
+        standalone_mode=False,
+        catch_exceptions=False,
+    )
+    assert result.return_value == {
+        "f": ("flag", "other", "flag"),
+        "a": "1",
+        "b": ("a", "b"),
+    }
+
+
+def test_type_from_flag_value():
+    param = click.Option(["-a", "x"], default=True, flag_value=4)
+    assert param.type is click.INT
+    param = click.Option(["-b", "x"], flag_value=8)
+    assert param.type is click.INT
+    # Non-basic types auto-detect as UNPROCESSED to avoid stringification.
+    param = click.Option(["-c", "x"], flag_value=EngineType.OSS)
+    assert param.type is click.UNPROCESSED
+    param = click.Option(["-d", "x"], flag_value=frozenset())
+    assert param.type is click.UNPROCESSED
+
+
+@pytest.mark.parametrize(
+    ("opt_params", "args", "expected"),
+    [
+        # The type passed to the option is responsible to converting the value, whether
+        # we pass the option flag or not.
+        ({"type": bool}, [], False),
+        ({"type": bool}, ["--foo"], True),
+        ({"type": click.BOOL}, [], False),
+        ({"type": click.BOOL}, ["--foo"], True),
+        ({"type": str}, [], None),
+        ({"type": str}, ["--foo"], "True"),
+        # Default value is given as-is to the --foo option when it is not passed,
+        # whatever the type. Now if --foo is passed, the value is always True, whatever
+        # the type. In both case the type of the option is responsible for the
+        # conversion of the value.
+        ({"type": bool, "default": True}, [], True),
+        ({"type": bool, "default": True}, ["--foo"], True),
+        ({"type": bool, "default": False}, [], False),
+        ({"type": bool, "default": False}, ["--foo"], True),
+        # ({"type": bool, "default": "foo"}, [], "foo"),
+        ({"type": bool, "default": "foo"}, ["--foo"], True),
+        ({"type": bool, "default": None}, [], None),
+        ({"type": bool, "default": None}, ["--foo"], True),
+        ({"type": click.BOOL, "default": True}, [], True),
+        ({"type": click.BOOL, "default": True}, ["--foo"], True),
+        ({"type": click.BOOL, "default": False}, [], False),
+        ({"type": click.BOOL, "default": False}, ["--foo"], True),
+        # ({"type": click.BOOL, "default": "foo"}, [], "foo"),
+        ({"type": click.BOOL, "default": "foo"}, ["--foo"], True),
+        ({"type": click.BOOL, "default": None}, [], None),
+        ({"type": click.BOOL, "default": None}, ["--foo"], True),
+        ({"type": str, "default": True}, [], "True"),
+        ({"type": str, "default": True}, ["--foo"], "True"),
+        ({"type": str, "default": False}, [], "False"),
+        ({"type": str, "default": False}, ["--foo"], "True"),
+        ({"type": str, "default": "foo"}, [], "foo"),
+        ({"type": str, "default": "foo"}, ["--foo"], "True"),
+        ({"type": str, "default": None}, [], None),
+        ({"type": str, "default": None}, ["--foo"], "True"),
+        # Flag value is given as-is to the --foo option when it is passed, then
+        # converted by the option type.
+        ({"type": bool, "flag_value": True}, [], False),
+        ({"type": bool, "flag_value": True}, ["--foo"], True),
+        ({"type": bool, "flag_value": False}, [], False),
+        ({"type": bool, "flag_value": False}, ["--foo"], False),
+        ({"type": bool, "flag_value": None}, [], False),
+        ({"type": bool, "flag_value": None}, ["--foo"], None),
+        ({"type": click.BOOL, "flag_value": True}, [], False),
+        ({"type": click.BOOL, "flag_value": True}, ["--foo"], True),
+        ({"type": click.BOOL, "flag_value": False}, [], False),
+        ({"type": click.BOOL, "flag_value": False}, ["--foo"], False),
+        ({"type": click.BOOL, "flag_value": None}, [], False),
+        ({"type": click.BOOL, "flag_value": None}, ["--foo"], None),
+        ({"type": str, "flag_value": True}, [], None),
+        ({"type": str, "flag_value": True}, ["--foo"], "True"),
+        ({"type": str, "flag_value": False}, [], None),
+        ({"type": str, "flag_value": False}, ["--foo"], "False"),
+        ({"type": str, "flag_value": "foo"}, [], None),
+        ({"type": str, "flag_value": "foo"}, ["--foo"], "foo"),
+        ({"type": str, "flag_value": None}, [], None),
+        ({"type": str, "flag_value": None}, ["--foo"], None),
+        # Not passing --foo returns the default value as-is, in its Python type, then
+        # converted by the option type. For boolean flags, default=True is a literal
+        # value, not a sentinel meaning "activate flag". So it is NOT substituted with
+        # flag_value. See: https://github.com/pallets/click/issues/3111
+        # https://github.com/pallets/click/pull/3239
+        ({"type": bool, "default": True, "flag_value": True}, [], True),
+        ({"type": bool, "default": True, "flag_value": False}, [], True),
+        ({"type": bool, "default": False, "flag_value": True}, [], False),
+        ({"type": bool, "default": False, "flag_value": False}, [], False),
+        ({"type": bool, "default": None, "flag_value": True}, [], None),
+        ({"type": bool, "default": None, "flag_value": False}, [], None),
+        ({"type": str, "default": True, "flag_value": True}, [], "True"),
+        ({"type": str, "default": True, "flag_value": False}, [], "False"),
+        ({"type": str, "default": False, "flag_value": True}, [], "False"),
+        ({"type": str, "default": False, "flag_value": False}, [], "False"),
+        ({"type": str, "default": "foo", "flag_value": True}, [], "foo"),
+        ({"type": str, "default": "foo", "flag_value": False}, [], "foo"),
+        ({"type": str, "default": "foo", "flag_value": "bar"}, [], "foo"),
+        ({"type": str, "default": "foo", "flag_value": None}, [], "foo"),
+        ({"type": str, "default": None, "flag_value": True}, [], None),
+        ({"type": str, "default": None, "flag_value": False}, [], None),
+        # Passing --foo returns the flag_value that was explicitly set by the user,
+        # with its Python type, but still converted by the option type.
+        ({"type": bool, "default": True, "flag_value": True}, ["--foo"], True),
+        ({"type": bool, "default": True, "flag_value": False}, ["--foo"], False),
+        ({"type": bool, "default": False, "flag_value": True}, ["--foo"], True),
+        ({"type": bool, "default": False, "flag_value": False}, ["--foo"], False),
+        ({"type": bool, "default": None, "flag_value": True}, ["--foo"], True),
+        ({"type": bool, "default": None, "flag_value": False}, ["--foo"], False),
+        ({"type": str, "default": True, "flag_value": True}, ["--foo"], "True"),
+        ({"type": str, "default": True, "flag_value": False}, ["--foo"], "False"),
+        ({"type": str, "default": False, "flag_value": True}, ["--foo"], "True"),
+        ({"type": str, "default": False, "flag_value": False}, ["--foo"], "False"),
+        ({"type": str, "default": "foo", "flag_value": True}, ["--foo"], "True"),
+        ({"type": str, "default": "foo", "flag_value": False}, ["--foo"], "False"),
+        ({"type": str, "default": "foo", "flag_value": "bar"}, ["--foo"], "bar"),
+        ({"type": str, "default": "foo", "flag_value": None}, ["--foo"], None),
+        ({"type": str, "default": None, "flag_value": True}, ["--foo"], "True"),
+        ({"type": str, "default": None, "flag_value": False}, ["--foo"], "False"),
+    ],
+)
+def test_flag_value_and_default(runner, opt_params, args, expected):
+    @click.command()
+    @click.option("--foo", is_flag=True, **opt_params)
+    def cmd(foo):
+        click.echo(repr(foo), nl=False)
+
+    result = runner.invoke(cmd, args)
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("args", "opts"),
+    [
+        ([], {"type": bool, "default": "foo"}),
+        ([], {"type": click.BOOL, "default": "foo"}),
+        (["--foo"], {"type": bool, "flag_value": "foo"}),
+        (["--foo"], {"type": click.BOOL, "flag_value": "foo"}),
+    ],
+)
+def test_invalid_flag_definition(runner, args, opts):
+    @click.command()
+    @click.option("--foo", is_flag=True, **opts)
+    def cmd(foo):
+        click.echo(foo)
+
+    result = runner.invoke(cmd, args)
+    assert (
+        "Error: Invalid value for '--foo': 'foo' is not a valid boolean"
+        in result.output
+    )
+
+
+@pytest.mark.parametrize(
+    ("default", "args", "expected"),
+    # These test cases are similar to the ones in
+    # tests/test_basic.py::test_flag_value_dual_options, so keep them in sync.
+    (
+        # Each option is returning its own flag_value, whatever the default is.
+        (True, ["--js"], "js"),
+        (True, ["--xml"], "xml"),
+        (False, ["--js"], "js"),
+        (False, ["--xml"], "xml"),
+        (None, ["--js"], "js"),
+        (None, ["--xml"], "xml"),
+        (UNSET, ["--js"], "js"),
+        (UNSET, ["--xml"], "xml"),
+        # Check that the last option wins when both are specified.
+        (True, ["--js", "--xml"], "xml"),
+        (True, ["--xml", "--js"], "js"),
+        # Check that the default is returned as-is when no option is specified.
+        ("js", [], "js"),
+        ("xml", [], "xml"),
+        ("jS", [], "jS"),
+        ("xMl", [], "xMl"),
+        (" ᕕ( ᐛ )ᕗ ", [], " ᕕ( ᐛ )ᕗ "),
+        (None, [], None),
+        # Special case: UNSET is not provided as-is to the callback, but normalized to
+        # None.
+        (UNSET, [], None),
+        # Special case: if default=True and flag_value is set, the value returned is the
+        # flag_value, not the True Python value itself.
+        (True, [], "js"),
+        # Non-string defaults are process as strings by the default Parameter's type.
+        (False, [], "False"),
+        (42, [], "42"),
+        (12.3, [], "12.3"),
+    ),
+)
+def test_default_dual_option_callback(runner, default, args, expected):
+    """Check how default is processed by the callback when options compete for the same
+    variable name.
+
+    Reproduction of the issue reported in
+    https://github.com/pallets/click/pull/3030#discussion_r2271571819
+
+    .. hint::
+        Similar to ``test_basic.py::test_flag_value_dual_options``.
+
+        ``test_defaults.py::test_shared_param_prefers_first_default``
+        is a smoke-test complement that exercises both default placements.
+    """
+
+    def _my_func(ctx, param, value):
+        # Print the value received by the callback as-is, so we can check for it.
+        return f"Callback value: {value!r}"
+
+    @click.command()
+    @click.option("--js", "fmt", flag_value="js", callback=_my_func, default=default)
+    @click.option("--xml", "fmt", flag_value="xml", callback=_my_func)
+    def main(fmt):
+        click.secho(fmt, nl=False)
+
+    result = runner.invoke(main, args)
+    assert result.output == f"Callback value: {expected!r}"
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    ("flag_value", "envvar_value", "expected"),
+    [
+        # The envvar match exactly the flag value and is case-sensitive.
+        ("bar", "bar", "bar"),
+        ("BAR", "BAR", "BAR"),
+        (" bar ", " bar ", " bar "),
+        ("42", "42", "42"),
+        ("None", "None", "None"),
+        ("True", "True", "True"),
+        ("False", "False", "False"),
+        ("true", "true", "true"),
+        ("false", "false", "false"),
+        ("A B", "A B", "A B"),
+        (" 1 2 ", " 1 2 ", " 1 2 "),
+        ("9.3", "9.3", "9.3"),
+        ("a;n", "a;n", "a;n"),
+        ("x:y", "x:y", "x:y"),
+        ("i/o", "i/o", "i/o"),
+        # Empty or absent envvar is consider unset, so the flag default value is
+        # returned, which is None in this case.
+        ("bar", "", None),
+        ("bar", None, None),
+        ("BAR", "", None),
+        ("BAR", None, None),
+        (" bar ", "", None),
+        (" bar ", None, None),
+        (42, "", None),
+        (42, None, None),
+        ("42", "", None),
+        ("42", None, None),
+        (None, "", None),
+        (None, None, None),
+        ("None", "", None),
+        ("None", None, None),
+        (True, "", None),
+        (True, None, None),
+        ("True", "", None),
+        ("True", None, None),
+        ("true", "", None),
+        ("true", None, None),
+        (False, "", None),
+        (False, None, None),
+        ("False", "", None),
+        ("False", None, None),
+        ("false", "", None),
+        ("false", None, None),
+        # Activate the flag with a value recognized as True by the envvar, which
+        # returns the flag_value.
+        ("bar", "True", "bar"),
+        ("bar", "true", "bar"),
+        ("bar", "trUe", "bar"),
+        ("bar", "  TRUE  ", "bar"),
+        ("bar", "1", "bar"),
+        ("bar", "yes", "bar"),
+        ("bar", "on", "bar"),
+        ("bar", "t", "bar"),
+        ("bar", "y", "bar"),
+        # Deactivating the flag with a value recognized as False by the envvar, which
+        # explicitly return the 'False' as the option is explicitly declared as a
+        # string.
+        ("bar", "False", "False"),
+        ("bar", "false", "False"),
+        ("bar", "faLse", "False"),
+        ("bar", "  FALSE  ", "False"),
+        ("bar", "0", "False"),
+        ("bar", "no", "False"),
+        ("bar", "off", "False"),
+        ("bar", "f", "False"),
+        ("bar", "n", "False"),
+        # Any other value than the flag_value, or a recogned True or False value, fails
+        # to explicitly activate or deactivate the flag. So the flag default value is
+        # returned, which is None in this case.
+        ("bar", " bar ", None),
+        ("bar", "BAR", None),
+        ("bar", "random", None),
+        ("bar", "bar random", None),
+        ("bar", "random bar", None),
+        ("BAR", "bar", None),
+        (" bar ", "bar", None),
+        (" bar ", "BAR", None),
+        (42, "42", None),
+        (42, "foo", None),
+        (None, "foo", None),
+        ("None", "foo", None),
+    ],
+)
+def test_envvar_string_flag_value(runner, flag_value, envvar_value, expected):
+    """Ensure that flag_value is recognized by the envvar."""
+
+    @click.command()
+    @click.option("--upper", type=str, flag_value=flag_value, envvar="UPPER")
+    def cmd(upper):
+        click.echo(repr(upper), nl=False)
+
+    result = runner.invoke(cmd, env={"UPPER": envvar_value})
+    assert result.exit_code == 0
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("opt_decls", "opt_params", "expect_is_flag", "expect_is_bool_flag"),
+    [
+        # Not boolean flags.
+        ("-a", {"type": int}, False, False),
+        ("-a", {"type": bool}, False, False),
+        ("-a", {"default": True}, False, False),
+        ("-a", {"default": False}, False, False),
+        ("-a", {"flag_value": 1}, True, False),
+        # Boolean flags.
+        ("-a", {"is_flag": True}, True, True),
+        ("-a/-A", {}, True, True),
+        ("-a", {"flag_value": True}, True, True),
+        # Non-flag with flag_value.
+        ("-a", {"is_flag": False, "flag_value": 1}, False, False),
+    ],
+)
+def test_flag_auto_detection(
+    opt_decls, opt_params, expect_is_flag, expect_is_bool_flag
+):
+    option = Option([opt_decls], **opt_params)
+    assert option.is_flag is expect_is_flag
+    assert option.is_bool_flag is expect_is_bool_flag
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"count": True, "multiple": True}, "'count' is not valid with 'multiple'."),
+        ({"count": True, "is_flag": True}, "'count' is not valid with 'is_flag'."),
+    ],
+)
+def test_invalid_flag_combinations(runner, kwargs, message):
+    with pytest.raises(TypeError) as e:
+        click.Option(["-a"], **kwargs)
+
+    assert message in str(e.value)
+
+
+def test_non_flag_with_non_negatable_default(runner):
+    class NonNegatable:
+        def __bool__(self):
+            raise ValueError("Cannot negate this object")
+
+    @click.command()
+    @click.option("--foo", default=NonNegatable())
+    def cmd(foo):
+        pass
+
+    result = runner.invoke(cmd)
+    assert result.exit_code == 0
+
+
+class HashType(enum.Enum):
+    MD5 = "MD5"
+    SHA1 = "SHA1"
+    SHA256 = "SHA-256"
+
+
+class Number(enum.IntEnum):
+    ONE = enum.auto()
+    TWO = enum.auto()
+
+
+class Letter(enum.StrEnum):
+    NAME_1 = "Value-1"
+    NAME_2 = "Value_2"
+    NAME_3 = "42_value"
+
+
+class Color(enum.Flag):
+    RED = enum.auto()
+    GREEN = enum.auto()
+    BLUE = enum.auto()
+
+
+class ColorInt(enum.IntFlag):
+    RED = enum.auto()
+    GREEN = enum.auto()
+    BLUE = enum.auto()
+
+
+@pytest.mark.parametrize(
+    ("choices", "metavar"),
+    [
+        (["foo", "bar"], "[TEXT]"),
+        ([1, 2], "[INTEGER]"),
+        ([1.0, 2.0], "[FLOAT]"),
+        ([True, False], "[BOOLEAN]"),
+        (["foo", 1], "[TEXT|INTEGER]"),
+        (HashType, "[HASHTYPE]"),
+        (Number, "[NUMBER]"),
+        (Letter, "[LETTER]"),
+        (Color, "[COLOR]"),
+        (ColorInt, "[COLORINT]"),
+    ],
+)
+def test_choice_usage_rendering(runner, choices, metavar):
+    """BY default ``--help`` prints choice's values in the usage message.
+
+    But ``show_choices=False`` makes ``--help`` prints choice's METAVAR instead of
+    values.
+
+    Also check that usage error message always suggests the actual values.
+    """
+
+    @click.command()
+    @click.option("-g", type=click.Choice(choices))
+    def cli_with_choices(g):
+        pass
+
+    @click.command()
+    @click.option("-g", type=click.Choice(choices), show_choices=False)
+    def cli_without_choices(g):
+        pass
+
+    display_values = tuple(
+        i.name if isinstance(i, enum.Enum) else str(i) for i in choices
+    )
+
+    # Check that the choices values are rendered as-is in the usage message.
+    result = runner.invoke(cli_with_choices, ["--help"])
+    assert f"[{'|'.join(display_values)}]" in result.stdout
+    assert not result.stderr
+    assert result.exit_code == 0
+
+    # Check that the metavar is rendered instead of the choices values themselves.
+    result = runner.invoke(cli_without_choices, ["--help"])
+    assert metavar in result.stdout
+    assert not result.stderr
+    assert result.exit_code == 0
+
+    # Check the usage error message suggests the actual accepted values.
+    for cli in (cli_with_choices, cli_without_choices):
+        result = runner.invoke(cli, ["-g", "random"])
+        assert (
+            "\n\nError: Invalid value for '-g': 'random' is not one of "
+            f"{', '.join(map(repr, display_values))}.\n" in result.stderr
+        )
+        assert not result.stdout
+        assert result.exit_code == 2
+
+
+@pytest.mark.parametrize(
+    ("choices", "default", "default_string"),
+    [
+        (["foo", "bar"], "bar", "bar"),
+        # The default value is not enforced to be in the choices.
+        (["foo", "bar"], "random", "random"),
+        # None cannot be a default value as-is: it left the default value as unset.
+        (["foo", "bar"], None, None),
+        ([0, 1], 0, "0"),
+        # Values are not coerced to the type of the choice, even if equivalent.
+        ([0, 1], 0.0, "0.0"),
+        ([1, 2], 2, "2"),
+        ([1.0, 2.0], 2, "2"),
+        ([1.0, 2.0], 2.0, "2.0"),
+        ([True, False], True, "True"),
+        ([True, False], False, "False"),
+        (["foo", 1], "foo", "foo"),
+        (["foo", 1], 1, "1"),
+        # Enum choices are rendered as their names, not values.
+        # See: https://github.com/pallets/click/issues/2911
+        (HashType, HashType.SHA1, "SHA1"),
+        # Enum choices allow defaults strings that are their names.
+        (HashType, HashType.SHA256, "SHA256"),
+        (HashType, "SHA256", "SHA256"),
+        (Number, Number.TWO, "TWO"),
+        (Number, "TWO", "TWO"),
+        (Letter, Letter.NAME_1, "NAME_1"),
+        (Letter, Letter.NAME_2, "NAME_2"),
+        (Letter, Letter.NAME_3, "NAME_3"),
+        (Letter, "NAME_1", "NAME_1"),
+        (Letter, "NAME_2", "NAME_2"),
+        (Letter, "NAME_3", "NAME_3"),
+        (Color, Color.GREEN, "GREEN"),
+        (Color, "GREEN", "GREEN"),
+        (ColorInt, ColorInt.GREEN, "GREEN"),
+        (ColorInt, "GREEN", "GREEN"),
+    ],
+)
+def test_choice_default_rendering(runner, choices, default, default_string):
+    @click.command()
+    @click.option("-g", type=click.Choice(choices), default=default, show_default=True)
+    def cli_with_choices(g):
+        pass
+
+    # Check that the default value is kept normalized to the type of the choice.
+    assert cli_with_choices.params[0].default == default
+
+    result = runner.invoke(cli_with_choices, ["--help"])
+    extra_usage = f"[default: {default_string}]"
+    if default_string is None:
+        assert extra_usage not in result.output
+    else:
+        assert extra_usage in result.output
+
+
+@pytest.mark.parametrize(
+    "opts_one,opts_two",
+    [
+        # No duplicate shortnames
+        (
+            ("-a", "--aardvark"),
+            ("-a", "--avocado"),
+        ),
+        # No duplicate long names
+        (
+            ("-a", "--aardvark"),
+            ("-b", "--aardvark"),
+        ),
+    ],
+)
+def test_duplicate_names_warning(runner, opts_one, opts_two):
+    @click.command()
+    @click.option(*opts_one)
+    @click.option(*opts_two)
+    def cli(one, two):
+        pass
+
+    with pytest.warns(UserWarning):
+        runner.invoke(cli, [])
+
+
+OBJECT_SENTINEL = object()
+"""An object-based sentinel value."""
+
+
+class EnumSentinel(enum.Enum):
+    FALSY_SENTINEL = object()
+
+    def __bool__(self) -> Literal[False]:
+        """Force the sentinel to be falsy to make sure it is not caught by Click
+        internal implementation.
+
+        Falsy sentinels have been discussed in:
+        https://github.com/pallets/click/pull/3030#pullrequestreview-3106604795
+        https://github.com/pallets/click/pull/3030#pullrequestreview-3108471552
+        """
+        return False
+
+
+# Any kind of sentinel value is recognized by Click as a valid flag value.
+@pytest.mark.parametrize("sentinel", (OBJECT_SENTINEL, EnumSentinel.FALSY_SENTINEL))
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    (
+        # Option default to None.
+        ([], None),
+        # Config has no default value, and no flag value, so it requires an argument.
+        (
+            ["--config"],
+            re.compile(re.escape("Error: Option '--config' requires an argument.\n")),
+        ),
+        (
+            ["--no-config", "--config"],
+            re.compile(re.escape("Error: Option '--config' requires an argument.\n")),
+        ),
+        # Passing --no-config defaults to the sentinel value because of the flag_value,
+        # and then the custom type receives that sentinel and returns a message.
+        (["--no-config"], "No configuration file provided."),
+        # Passing --config with an argument returns the file path.
+        (["--config", "foo.conf"], "foo.conf"),
+        # An argument is not allowed for --no-config, so it raises an error.
+        (
+            ["--no-config", "foo.conf"],
+            re.compile(
+                r"Usage: main \[OPTIONS\]\n"
+                r"Try 'main --help' for help.\n"
+                r"\n"
+                r"Error: Got unexpected extra argument (.+)\n"
+            ),
+        ),
+        # Passing --config with an argument that does not exist raises an error.
+        (
+            ["--config", "random-file.conf"],
+            re.compile(
+                r"Usage: main \[OPTIONS\]\n"
+                r"Try 'main --help' for help.\n"
+                r"\n"
+                r"Error: Invalid value for '-c' / '--config': "
+                r"File 'random-file.conf' does not exist.\n"
+            ),
+        ),
+        (
+            ["--config", "--no-config"],
+            re.compile(
+                r"Usage: main \[OPTIONS\]\n"
+                r"Try 'main --help' for help.\n"
+                r"\n"
+                r"Error: Invalid value for '-c' / '--config': "
+                r"File '--no-config' does not exist.\n"
+            ),
+        ),
+        (
+            ["--config", "--no-config", "foo.conf"],
+            re.compile(
+                r"Usage: main \[OPTIONS\]\n"
+                r"Try 'main --help' for help.\n"
+                r"\n"
+                r"Error: Invalid value for '-c' / '--config': "
+                r"File '--no-config' does not exist.\n"
+            ),
+        ),
+        # --config is passed last and overrides the --no-config option.
+        (["--no-config", "--config", "foo.conf"], "foo.conf"),
+    ),
+)
+def test_dual_options_custom_type_sentinel_flag_value(runner, sentinel, args, expected):
+    """Check that an object-based sentinel, used as a flag value, is returned as-is
+    to a custom type that is shared by two options, competing for the same variable
+    name.
+
+    A reproduction of
+    https://github.com/pallets/click/issues/3024#issuecomment-3146511356
+    """
+
+    class ConfigParamType(click.ParamType):
+        """A custom type that accepts a file path or a sentinel value."""
+
+        def convert(self, value, param, ctx):
+            if value is sentinel:
+                return "No configuration file provided."
+            else:
+                return click.Path(exists=True, dir_okay=False).convert(
+                    value, param, ctx
+                )
+
+    @click.command()
+    @click.option("-c", "--config", type=ConfigParamType())
+    @click.option("--no-config", "config", flag_value=sentinel, type=ConfigParamType())
+    def main(config):
+        click.echo(repr(config), nl=False)
+
+    with tempfile.NamedTemporaryFile(mode="w") as named_tempfile:
+        if "foo.conf" in args:
+            named_tempfile.write("Blah blah")
+            named_tempfile.flush()
+            args = [named_tempfile.name if a == "foo.conf" else a for a in args]
+
+        result = runner.invoke(main, args)
+
+        if isinstance(expected, re.Pattern):
+            assert re.match(expected, result.output)
+        else:
+            assert result.output == repr(
+                named_tempfile.name if expected == "foo.conf" else expected
+            )
+
+
+class EngineType(enum.Enum):
+    OSS = enum.auto()
+    PRO = enum.auto()
+    MAX = enum.auto()
+
+
+class Class1:
+    pass
+
+
+class Class2:
+    pass
+
+
+@pytest.mark.parametrize(
+    ("opt_params", "args", "expected"),
+    [
+        # Check that the flag value is returned as-is when the option is passed, and
+        # not normalized to a boolean, even if it is explicitly declared as a flag.
+        ({"type": EngineType, "flag_value": None}, ["--pro"], None),
+        (
+            {"type": EngineType, "is_flag": True, "flag_value": None},
+            ["--pro"],
+            None,
+        ),
+        ({"type": EngineType, "flag_value": EngineType.OSS}, ["--pro"], EngineType.OSS),
+        (
+            {"type": EngineType, "is_flag": True, "flag_value": EngineType.OSS},
+            ["--pro"],
+            EngineType.OSS,
+        ),
+        (
+            {"type": EngineType, "is_flag": True, "default": EngineType.OSS},
+            ["--pro"],
+            EngineType.OSS,
+        ),
+        # The default value is returned as-is when the option is not passed, whatever
+        # the flag value.
+        ({"type": EngineType, "flag_value": None}, [], None),
+        ({"type": EngineType, "is_flag": True, "flag_value": None}, [], None),
+        ({"type": EngineType, "flag_value": EngineType.OSS}, [], None),
+        (
+            {"type": EngineType, "is_flag": True, "flag_value": EngineType.OSS},
+            [],
+            None,
+        ),
+        (
+            {"type": EngineType, "is_flag": True, "default": EngineType.OSS},
+            [],
+            EngineType.OSS,
+        ),
+        # The option has not enough parameters to be detected as flag-like, so it
+        # requires an argument.
+        (
+            {"type": EngineType, "default": EngineType.OSS},
+            ["--pro"],
+            re.compile(re.escape("Error: Option '--pro' requires an argument.\n")),
+        ),
+        ({"type": EngineType, "default": EngineType.OSS}, [], EngineType.OSS),
+        # If a flag value is set, it is returned instead of the default value.
+        (
+            {"type": EngineType, "flag_value": EngineType.OSS, "default": True},
+            ["--pro"],
+            EngineType.OSS,
+        ),
+        (
+            {"type": EngineType, "flag_value": EngineType.OSS, "default": True},
+            [],
+            EngineType.OSS,
+        ),
+        # Type is not specified. For string flag_value, STRING type is used and
+        # the default value is converted to string. For non-basic types (like
+        # enums), UNPROCESSED is used and values pass through unchanged.
+        ({"flag_value": "1", "default": True}, [], "1"),
+        ({"flag_value": "1", "default": 42}, [], "42"),
+        ({"flag_value": EngineType.OSS, "default": True}, [], EngineType.OSS),
+        ({"flag_value": EngineType.OSS, "default": 42}, [], 42),
+        # See: the result is the same if we force the type to be str.
+        ({"type": str, "flag_value": 1, "default": True}, [], "1"),
+        ({"type": str, "flag_value": 1, "default": 42}, [], "42"),
+        ({"type": str, "flag_value": "1", "default": True}, [], "1"),
+        ({"type": str, "flag_value": "1", "default": 42}, [], "42"),
+        (
+            {"type": str, "flag_value": EngineType.OSS, "default": True},
+            [],
+            "EngineType.OSS",
+        ),
+        ({"type": str, "flag_value": EngineType.OSS, "default": 42}, [], "42"),
+        # But having the flag value set to integer is automaticcally recognized by
+        # Click.
+        ({"flag_value": 1, "default": True}, [], 1),
+        ({"flag_value": 1, "default": 42}, [], 42),
+        ({"type": int, "flag_value": 1, "default": True}, [], 1),
+        ({"type": int, "flag_value": 1, "default": 42}, [], 42),
+        ({"type": int, "flag_value": "1", "default": True}, [], 1),
+        ({"type": int, "flag_value": "1", "default": 42}, [], 42),
+    ],
+)
+def test_custom_type_flag_value_standalone_option(runner, opt_params, args, expected):
+    """Test how the type and flag_value influence the returned value.
+
+    Cover cases reported in:
+    https://github.com/pallets/click/issues/3024#issuecomment-3146480714
+    https://github.com/pallets/click/issues/2012#issuecomment-892437060
+    """
+
+    @click.command()
+    @click.option("--pro", **opt_params)
+    def scan(pro):
+        click.echo(repr(pro), nl=False)
+
+    result = runner.invoke(scan, args)
+    if isinstance(expected, re.Pattern):
+        assert re.match(expected, result.output)
+    else:
+        assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("opt1_params", "opt2_params", "args", "expected"),
+    [
+        # Dual options sharing the same variable name, are not competitive, and the
+        # flag value is returned as-is. Especially when the type is force to be
+        # unprocessed.
+        (
+            {"flag_value": EngineType.OSS, "type": UNPROCESSED},
+            {"flag_value": EngineType.PRO, "type": UNPROCESSED},
+            [],
+            None,
+        ),
+        (
+            {"flag_value": EngineType.OSS, "type": UNPROCESSED},
+            {"flag_value": EngineType.PRO, "type": UNPROCESSED},
+            ["--opt1"],
+            EngineType.OSS,
+        ),
+        (
+            {"flag_value": EngineType.OSS, "type": UNPROCESSED},
+            {"flag_value": EngineType.PRO, "type": UNPROCESSED},
+            ["--opt2"],
+            EngineType.PRO,
+        ),
+        # Exotic flag values like classes are passed through unchanged when no
+        # explicit type is given (UNPROCESSED is auto-detected).
+        # https://github.com/pallets/click/issues/2012
+        # https://github.com/pallets/click/issues/3121
+        (
+            {"flag_value": Class1, "default": True},
+            {"flag_value": Class2},
+            [],
+            Class1,
+        ),
+        (
+            {"flag_value": Class1, "default": True},
+            {"flag_value": Class2},
+            ["--opt1"],
+            Class1,
+        ),
+        (
+            {"flag_value": Class1, "default": True},
+            {"flag_value": Class2},
+            ["--opt2"],
+            Class2,
+        ),
+        # String and None defaults pass through unchanged.
+        ({"flag_value": Class1, "default": "True"}, {"flag_value": Class2}, [], "True"),
+        ({"flag_value": Class1, "default": None}, {"flag_value": Class2}, [], None),
+        # To get the classes as-is, we need to specify the type as UNPROCESSED.
+        # https://github.com/pallets/click/issues/3121
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": True},
+            {"flag_value": Class2, "type": UNPROCESSED},
+            [],
+            Class1,
+        ),
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": True},
+            {"flag_value": Class2, "type": UNPROCESSED},
+            ["--opt1"],
+            Class1,
+        ),
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": True},
+            {"flag_value": Class2, "type": UNPROCESSED},
+            ["--opt2"],
+            Class2,
+        ),
+        # Setting the default to a class, an instance of the class is returned instead
+        # of the class itself, because the default is allowed to be callable (and
+        # consumed). And this happens whatever the type is.
+        (
+            {"flag_value": Class1, "default": Class1},
+            {"flag_value": Class2},
+            [],
+            re.compile(r"<test_options.Class1 object at 0x[0-9A-Fa-f]+>"),
+        ),
+        (
+            {"flag_value": Class1, "default": Class2},
+            {"flag_value": Class2},
+            [],
+            re.compile(r"<test_options.Class2 object at 0x[0-9A-Fa-f]+>"),
+        ),
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": Class1},
+            {"flag_value": Class2, "type": UNPROCESSED},
+            [],
+            re.compile(r"<test_options.Class1 object at 0x[0-9A-Fa-f]+>"),
+        ),
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": Class2},
+            {"flag_value": Class2, "type": UNPROCESSED},
+            [],
+            re.compile(r"<test_options.Class2 object at 0x[0-9A-Fa-f]+>"),
+        ),
+        # Having the flag value set to integer is automaticcally recognized by Click.
+        (
+            {"flag_value": 1, "default": True},
+            {"flag_value": "1"},
+            [],
+            1,
+        ),
+        (
+            {"flag_value": 1, "type": int, "default": True},
+            {"flag_value": "1", "type": int},
+            [],
+            1,
+        ),
+    ],
+)
+def test_custom_type_flag_value_dual_options(
+    runner, opt1_params, opt2_params, args, expected
+):
+    """Test how flag values are processed with dual options competing for the same
+    variable name.
+
+    Reproduce issues reported in:
+    https://github.com/pallets/click/issues/3024#issuecomment-3146508536
+    https://github.com/pallets/click/issues/2012#issue-946471049
+    https://github.com/pallets/click/issues/2012#issuecomment-892437060
+    """
+
+    @click.command()
+    @click.option("--opt1", "dual_option", **opt1_params)
+    @click.option("--opt2", "dual_option", **opt2_params)
+    def cli(dual_option):
+        click.echo(repr(dual_option), nl=False)
+
+    result = runner.invoke(cli, args)
+    if isinstance(expected, re.Pattern):
+        assert re.match(expected, result.output)
+    else:
+        assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("opt_params", "args", "expected"),
+    [
+        # Class flag_value with default=True and UNPROCESSED: the class itself is
+        # returned, NOT an instance. Regression test for
+        # https://github.com/pallets/click/issues/3121
+        ({"flag_value": Class1, "type": UNPROCESSED, "default": True}, [], Class1),
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": True},
+            ["--opt"],
+            Class1,
+        ),
+        # Without explicit UNPROCESSED, the class still passes through unchanged
+        # because UNPROCESSED is auto-detected for non-basic flag_value types.
+        ({"flag_value": Class1, "default": True}, [], Class1),
+        (
+            {"flag_value": Class1, "default": True},
+            ["--opt"],
+            Class1,
+        ),
+        # Explicit default=Class1 (not via default=True alignment): callable IS invoked,
+        # because the user explicitly set a callable as the default.
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": Class1},
+            [],
+            re.compile(r"<test_options.Class1 object at 0x[0-9A-Fa-f]+>"),
+        ),
+        # Explicit default=Class2, different from flag_value=Class1.
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": Class2},
+            [],
+            re.compile(r"<test_options.Class2 object at 0x[0-9A-Fa-f]+>"),
+        ),
+        # Non-callable flag_value with default=True: unaffected by the fix.
+        ({"flag_value": "upper", "default": True}, [], "upper"),
+        ({"flag_value": "upper", "default": True}, ["--opt"], "upper"),
+    ],
+)
+def test_callable_flag_value_not_instantiated(runner, opt_params, args, expected):
+    """A callable ``flag_value`` like a class, with ``default=True`` should not be
+    invoked when resolving the default. This is the single-option variant of
+    the regression reported in https://github.com/pallets/click/issues/3121.
+    """
+
+    @click.command()
+    @click.option("--opt", "value", **opt_params)
+    def cli(value):
+        click.echo(repr(value), nl=False)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0
+    if isinstance(expected, re.Pattern):
+        assert re.match(expected, result.output)
+    else:
+        assert result.output == repr(expected)
+
+
+def test_callable_flag_value_default_map(runner):
+    """A ``default_map`` entry should override the auto-aligned callable ``flag_value``.
+
+    When ``default=True`` and ``flag_value=SomeClass``, the default is aligned to
+    ``SomeClass``. If ``default_map`` provides a different value (including a
+    callable), it should take precedence and callables from ``default_map`` should
+    still be invoked.
+    """
+
+    @click.command()
+    @click.option("--opt", "value", flag_value=Class1, type=UNPROCESSED, default=True)
+    def cli(value):
+        click.echo(repr(value), nl=False)
+
+    # Static value in default_map overrides the flag_value default.
+    result = runner.invoke(cli, [], default_map={"value": "from-map"})
+    assert result.output == repr("from-map")
+
+    # Callable in default_map is still invoked (not suppressed by the fix).
+    result = runner.invoke(cli, [], default_map={"value": lambda: "lazy-map"})
+    assert result.output == repr("lazy-map")
+
+    # CLI arg still wins over everything.
+    result = runner.invoke(cli, ["--opt"])
+    assert result.output == repr(Class1)
+
+
+def test_callable_flag_value_show_default(runner):
+    """Help text with ``show_default=True`` should display the class name, not
+    instantiate it.
+    """
+
+    @click.command()
+    @click.option(
+        "--opt",
+        "value",
+        flag_value=Class1,
+        type=UNPROCESSED,
+        default=True,
+        show_default=True,
+    )
+    def cli(value):
+        pass
+
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "Class1" in result.output
+    assert "object at 0x" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("opt_params", "expected_default_attr", "expected_get_default"),
+    [
+        # default=True with callable flag_value: the attribute stays True
+        # (not eagerly aligned), but get_default() resolves to the flag_value.
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": True},
+            True,
+            Class1,
+        ),
+        # default=True with non-callable flag_value: same lazy resolution.
+        (
+            {"flag_value": "upper", "default": True},
+            True,
+            "upper",
+        ),
+        # Explicit default (not True): attribute and get_default() agree.
+        (
+            {"flag_value": Class1, "type": UNPROCESSED, "default": "custom"},
+            "custom",
+            "custom",
+        ),
+        # No default: attribute and get_default() are both UNSET.
+        (
+            {"flag_value": Class1, "type": UNPROCESSED},
+            UNSET,
+            UNSET,
+        ),
+    ],
+)
+def test_callable_flag_value_get_default_override(
+    runner, opt_params, expected_default_attr, expected_get_default
+):
+    """The ``default=True`` to ``flag_value`` alignment is resolved lazily in
+    ``get_default()`` rather than eagerly in ``__init__``. This means
+    ``option.default`` stays as ``True`` while ``get_default()`` returns the
+    ``flag_value``.
+
+    A user subclass that reads ``self.default`` directly (bypassing
+    ``get_default()``) will see ``True`` instead of the ``flag_value``.
+    """
+
+    @click.command()
+    @click.option("--opt", "value", **opt_params)
+    def cli(value):
+        pass
+
+    opt = cli.params[0]
+
+    # The raw attribute reflects what the user wrote.
+    assert opt.default is expected_default_attr
+
+    # get_default() resolves the alignment lazily.
+    ctx = click.Context(cli)
+    assert opt.get_default(ctx, call=True) is expected_get_default
+
+
+def test_flag_value_not_stringified_for_custom_types(runner):
+    """Non-basic flag_value types are passed through unchanged without
+    requiring ``type=click.UNPROCESSED``.
+
+    Regression test for https://github.com/pallets/click/issues/2012
+    """
+
+    @click.command()
+    @click.option("--cls1", "config_cls", flag_value=Class1, default=True)
+    @click.option("--cls2", "config_cls", flag_value=Class2)
+    def cli(config_cls):
+        click.echo(repr(config_cls), nl=False)
+
+    # Default activates --cls1 (default=True resolves to flag_value).
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 0
+    assert result.output == repr(Class1)
+
+    result = runner.invoke(cli, ["--cls1"])
+    assert result.exit_code == 0
+    assert result.output == repr(Class1)
+
+    result = runner.invoke(cli, ["--cls2"])
+    assert result.exit_code == 0
+    assert result.output == repr(Class2)
+
+    # Enum flag_value without explicit type is also preserved.
+    @click.command()
+    @click.option("--oss", "engine", flag_value=EngineType.OSS, default=True)
+    @click.option("--pro", "engine", flag_value=EngineType.PRO)
+    def cli2(engine):
+        click.echo(repr(engine), nl=False)
+
+    result = runner.invoke(cli2, [])
+    assert result.exit_code == 0
+    assert result.output == repr(EngineType.OSS)
+
+    result = runner.invoke(cli2, ["--pro"])
+    assert result.exit_code == 0
+    assert result.output == repr(EngineType.PRO)
+
+
+def test_custom_type_frozenset_flag_value(runner):
+    """Check that frozenset is correctly handled as a type, a flag value and a default.
+
+    Reproduces https://github.com/pallets/click/issues/2610
+    """
+
+    @click.command()
+    @click.option(
+        "--without-scm-ignore-files",
+        "scm_ignore_files",
+        is_flag=True,
+        type=frozenset,
+        flag_value=frozenset(),
+        default=frozenset(["git"]),
+    )
+    def rcli(scm_ignore_files):
+        click.echo(repr(scm_ignore_files), nl=False)
+
+    result = runner.invoke(rcli)
+    assert result.stdout == "frozenset({'git'})"
+    assert result.exit_code == 0
+
+    result = runner.invoke(rcli, ["--without-scm-ignore-files"])
+    assert result.stdout == "frozenset()"
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    ("default", "args", "expected"),
+    [
+        # default=None: 3-state pattern (e.g. Flask --reload/--no-reload).
+        # https://github.com/pallets/click/issues/3024
+        (None, [], None),
+        (None, ["--flag"], True),
+        (None, ["--no-flag"], False),
+        # default=True: literal value, not substituted with flag_value.
+        # https://github.com/pallets/click/issues/3111
+        (True, [], True),
+        (True, ["--flag"], True),
+        (True, ["--no-flag"], False),
+    ],
+)
+def test_bool_flag_pair_default(runner, default, args, expected):
+    """Boolean flag pairs pass ``default`` through literally.
+
+    Ensures ``default=True`` is not replaced by ``flag_value`` for boolean
+    flags, and that ``default=None`` enables 3-state logic.
+    """
+
+    @click.command()
+    @click.option("--flag/--no-flag", default=default)
+    def cli(flag):
+        click.echo(repr(flag), nl=False)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("opts", "args", "expected"),
+    [
+        # #3403 reproducer: enable/disable pair with explicit ``default=True``
+        # on the positive flag, declared after (inner decorator) the negative.
+        # https://github.com/pallets/click/issues/3403
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": True}),
+            ],
+            [],
+            True,
+            id="3403-reproducer-no-args",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": True}),
+            ],
+            ["--with-xyz"],
+            True,
+            id="3403-reproducer-with-only",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": True}),
+            ],
+            ["--without-xyz"],
+            False,
+            id="3403-reproducer-without-only",
+        ),
+        # When both flags are passed, the parser keeps the last value seen.
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": True}),
+            ],
+            ["--with-xyz", "--without-xyz"],
+            False,
+            id="3403-reproducer-with-then-without",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": True}),
+            ],
+            ["--without-xyz", "--with-xyz"],
+            True,
+            id="3403-reproducer-without-then-with",
+        ),
+        # Order-independence: explicit ``default=True`` on the OUTER
+        # decorator (declared first) must produce the same behavior.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True, "default": True}),
+                ("--without-xyz", {"flag_value": False}),
+            ],
+            [],
+            True,
+            id="explicit-default-outer-no-args",
+        ),
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True, "default": True}),
+                ("--without-xyz", {"flag_value": False}),
+            ],
+            ["--without-xyz"],
+            False,
+            id="explicit-default-outer-cmdline-overrides",
+        ),
+        # Explicit ``default=False`` on the negative flag wins over the
+        # auto-derived default of the positive one. Result value is False
+        # either way, but the assertion still guards source tracking.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True}),
+                ("--without-xyz", {"flag_value": False, "default": False}),
+            ],
+            [],
+            False,
+            id="explicit-default-false-on-negative",
+        ),
+        # Explicit ``default=True`` on the negative flag is unusual but
+        # legal: post-#3239, it is a literal Python value, not a sentinel.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True}),
+                ("--without-xyz", {"flag_value": False, "default": True}),
+            ],
+            [],
+            True,
+            id="explicit-default-true-on-negative",
+        ),
+        # Both options carry an explicit default: last-wins, so the option
+        # declared last in the source code keeps the slot. Confirms the
+        # explicit-beats-auto tie-break does not also promote first-declared
+        # over a later explicit default.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True, "default": True}),
+                ("--without-xyz", {"flag_value": False, "default": False}),
+            ],
+            [],
+            False,
+            id="both-explicit-defaults-last-wins",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False, "default": False}),
+                ("--with-xyz", {"flag_value": True, "default": True}),
+            ],
+            [],
+            True,
+            id="both-explicit-defaults-last-wins-swapped",
+        ),
+        # No option has an explicit default: every boolean flag
+        # auto-derives ``default=False`` regardless of its ``flag_value``,
+        # so the slot is False either way. Last-wins applies under the hood
+        # but is not observable because both values are equal.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True}),
+                ("--without-xyz", {"flag_value": False}),
+            ],
+            [],
+            False,
+            id="both-auto-defaults-positive-first",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True}),
+            ],
+            [],
+            False,
+            id="both-auto-defaults-negative-first",
+        ),
+        # Explicit ``default=False`` matching the auto-derived value:
+        # the explicit option still wins the slot. Confirms tracking is
+        # source-based and not value-based.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True, "default": False}),
+                ("--without-xyz", {"flag_value": False}),
+            ],
+            [],
+            False,
+            id="explicit-default-matches-auto-still-wins",
+        ),
+        # Three-flag group: the explicit default wins regardless of its
+        # position in the decorator stack.
+        pytest.param(
+            [
+                ("--auto-a", {"flag_value": True}),
+                ("--explicit", {"flag_value": False, "default": False}),
+                ("--auto-b", {"flag_value": True}),
+            ],
+            [],
+            False,
+            id="three-flags-explicit-in-middle",
+        ),
+        pytest.param(
+            [
+                ("--auto-a", {"flag_value": True}),
+                ("--auto-b", {"flag_value": False}),
+                ("--explicit", {"flag_value": True, "default": True}),
+            ],
+            [],
+            True,
+            id="three-flags-explicit-last",
+        ),
+        pytest.param(
+            [
+                ("--explicit", {"flag_value": False, "default": False}),
+                ("--auto-a", {"flag_value": True}),
+                ("--auto-b", {"flag_value": True}),
+            ],
+            [],
+            False,
+            id="three-flags-explicit-first",
+        ),
+        # Three-state pattern: explicit ``default=None`` on one option
+        # must beat a sibling's auto-derived ``False``.
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": None}),
+            ],
+            [],
+            None,
+            id="explicit-default-none-three-state",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": None}),
+            ],
+            ["--with-xyz"],
+            True,
+            id="explicit-default-none-three-state-with",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False}),
+                ("--with-xyz", {"flag_value": True, "default": None}),
+            ],
+            ["--without-xyz"],
+            False,
+            id="explicit-default-none-three-state-without",
+        ),
+        # Command-line input always beats any default, regardless of
+        # which option carried the explicit default.
+        pytest.param(
+            [
+                ("--with-xyz", {"flag_value": True, "default": True}),
+                ("--without-xyz", {"flag_value": False}),
+            ],
+            ["--without-xyz"],
+            False,
+            id="cmdline-beats-explicit-default",
+        ),
+        pytest.param(
+            [
+                ("--without-xyz", {"flag_value": False, "default": False}),
+                ("--with-xyz", {"flag_value": True}),
+            ],
+            ["--with-xyz"],
+            True,
+            id="cmdline-beats-explicit-default-symmetric",
+        ),
+    ],
+)
+def test_bool_flag_group_competition(runner, opts, args, expected):
+    """Competing boolean flags sharing a single parameter name.
+
+    Verifies the arbitration rules between options that target the same
+    variable name in a feature-switch group.
+
+    Regression test for https://github.com/pallets/click/issues/3403
+    """
+
+    @click.command()
+    def cli(enable_xyz):
+        click.echo(repr(enable_xyz), nl=False)
+
+    for opt_name, opt_kwargs in opts:
+        cli = click.option(opt_name, "enable_xyz", **opt_kwargs)(cli)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("envvar_value", "args", "expected"),
+    [
+        # An env var on one option in the group provides ENVIRONMENT source,
+        # which beats any sibling's DEFAULT regardless of explicit-default.
+        ("1", [], True),
+        ("0", [], False),
+        # Command-line still beats the env var.
+        ("0", ["--with-xyz"], True),
+        ("1", ["--without-xyz"], False),
+    ],
+)
+def test_bool_flag_group_competition_with_envvar(
+    runner, monkeypatch, envvar_value, args, expected
+):
+    monkeypatch.setenv("XYZ", envvar_value)
+
+    @click.command()
+    @click.option("--without-xyz", "enable_xyz", flag_value=False)
+    @click.option(
+        "--with-xyz",
+        "enable_xyz",
+        flag_value=True,
+        default=False,
+        envvar="XYZ",
+    )
+    def cli(enable_xyz):
+        click.echo(repr(enable_xyz), nl=False)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("default_map", "args", "expected"),
+    [
+        # ``default_map`` provides DEFAULT_MAP source, beating either default.
+        ({"enable_xyz": True}, [], True),
+        ({"enable_xyz": False}, [], False),
+        # Command-line still beats default_map.
+        ({"enable_xyz": False}, ["--with-xyz"], True),
+        ({"enable_xyz": True}, ["--without-xyz"], False),
+    ],
+)
+def test_bool_flag_group_competition_with_default_map(
+    runner, default_map, args, expected
+):
+    @click.command()
+    @click.option("--without-xyz", "enable_xyz", flag_value=False)
+    @click.option("--with-xyz", "enable_xyz", flag_value=True, default=True)
+    def cli(enable_xyz):
+        click.echo(repr(enable_xyz), nl=False)
+
+    result = runner.invoke(cli, args, default_map=default_map)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("opts", "args", "expected"),
+    [
+        # Non-boolean feature switch group: classic --upper/--lower
+        # pattern. The option with ``default=True`` acts as the default
+        # via the substitution rule (#3239) for non-boolean ``flag_value``.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": True}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            [],
+            "upper",
+            id="string-default-true-substitutes-to-flag-value",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": True}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            ["--upper"],
+            "upper",
+            id="string-default-true-cmdline-positive",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": True}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            ["--lower"],
+            "lower",
+            id="string-default-true-cmdline-overrides",
+        ),
+        # Explicit literal string default beats sibling's absent default.
+        # Confirms the explicit-beats-absent rule applies regardless of type.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": "lower"}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            [],
+            "lower",
+            id="string-explicit-default-wins-over-absent",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper"}),
+                ("--lower", {"flag_value": "lower", "default": "upper"}),
+            ],
+            [],
+            "upper",
+            id="string-explicit-default-wins-from-second-position",
+        ),
+        # Empty string as ``flag_value``: still a legal value, including
+        # under the ``default=True`` substitution rule.
+        pytest.param(
+            [
+                ("--empty", {"flag_value": "", "default": True}),
+                ("--filled", {"flag_value": "filled"}),
+            ],
+            [],
+            "",
+            id="empty-string-flag-value-default-true",
+        ),
+        pytest.param(
+            [
+                ("--empty", {"flag_value": "", "default": True}),
+                ("--filled", {"flag_value": "filled"}),
+            ],
+            ["--empty"],
+            "",
+            id="empty-string-flag-value-cmdline",
+        ),
+        # Empty string as ``default``: explicit empty string beats
+        # the sibling's absent default.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": ""}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            [],
+            "",
+            id="empty-string-explicit-default",
+        ),
+        # ``flag_value=None`` is a legal flag value: when the option is
+        # activated, the function receives ``None``.
+        pytest.param(
+            [
+                ("--none", {"flag_value": None, "default": "fallback"}),
+                ("--other", {"flag_value": "other"}),
+            ],
+            [],
+            "fallback",
+            id="none-flag-value-default-fallback",
+        ),
+        pytest.param(
+            [
+                ("--none", {"flag_value": None, "default": "fallback"}),
+                ("--other", {"flag_value": "other"}),
+            ],
+            ["--none"],
+            None,
+            id="none-flag-value-cmdline-passes-none",
+        ),
+        pytest.param(
+            [
+                ("--none", {"flag_value": None, "default": "fallback"}),
+                ("--other", {"flag_value": "other"}),
+            ],
+            ["--other"],
+            "other",
+            id="none-flag-value-cmdline-passes-other",
+        ),
+        # Explicit ``default=None`` is a real value (not absence) and
+        # must beat a sibling's absent default. Three-state pattern for
+        # non-boolean flag groups.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": None}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            [],
+            None,
+            id="explicit-default-none-three-state",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": None}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            ["--upper"],
+            "upper",
+            id="explicit-default-none-cmdline-upper",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": None}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            ["--lower"],
+            "lower",
+            id="explicit-default-none-cmdline-lower",
+        ),
+        # Passing ``default=UNSET`` explicitly is the same as not passing
+        # ``default`` at all, so the sibling's explicit default wins.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": UNSET}),
+                ("--lower", {"flag_value": "lower", "default": "lower"}),
+            ],
+            [],
+            "lower",
+            id="unset-default-equivalent-to-absent",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": UNSET}),
+                ("--lower", {"flag_value": "lower", "default": "lower"}),
+            ],
+            ["--upper"],
+            "upper",
+            id="unset-default-cmdline-still-works",
+        ),
+        # Neither option has a default: the slot resolves to ``None``
+        # because non-boolean flags do not auto-derive a default.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper"}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            [],
+            None,
+            id="non-boolean-no-defaults-resolves-to-none",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper"}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            ["--upper"],
+            "upper",
+            id="non-boolean-no-defaults-cmdline-still-works",
+        ),
+        # Three-flag string group: explicit default wins from any
+        # position in the decorator stack.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper"}),
+                ("--mixed", {"flag_value": "MiXeD", "default": "MiXeD"}),
+                ("--lower", {"flag_value": "lower"}),
+            ],
+            [],
+            "MiXeD",
+            id="three-flags-explicit-default-in-middle",
+        ),
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper"}),
+                ("--lower", {"flag_value": "lower"}),
+                ("--default-choice", {"flag_value": "chosen", "default": True}),
+            ],
+            [],
+            "chosen",
+            id="three-flags-default-true-substitution-last",
+        ),
+        # Both options have explicit defaults: last-wins, so the option
+        # declared last keeps the slot, regardless of value type.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": "first"}),
+                ("--lower", {"flag_value": "lower", "default": "second"}),
+            ],
+            [],
+            "second",
+            id="both-explicit-defaults-string-last-wins",
+        ),
+        # Mixed boolean and non-boolean ``flag_value`` in the same group
+        # is allowed. Both options here carry an explicit default, so last-wins
+        # picks the option declared last regardless of value type. The boolean
+        # ``default=False`` is a literal value (post-#3239), not a sentinel.
+        pytest.param(
+            [
+                ("--bool-flag", {"flag_value": True, "default": False}),
+                ("--str-flag", {"flag_value": "named", "default": "explicit"}),
+            ],
+            [],
+            "explicit",
+            id="mixed-bool-and-string-last-wins",
+        ),
+        pytest.param(
+            [
+                ("--str-flag", {"flag_value": "named", "default": "explicit"}),
+                ("--bool-flag", {"flag_value": True, "default": False}),
+            ],
+            [],
+            False,
+            id="mixed-bool-and-string-last-wins-swapped",
+        ),
+        # Empty string default coexisting with ``default=True``
+        # substitution: ``default=""`` is explicit, ``default=True`` is also
+        # explicit (and substitutes to the option's ``flag_value``). Last-wins
+        # picks the option declared last.
+        pytest.param(
+            [
+                ("--upper", {"flag_value": "upper", "default": True}),
+                ("--blank", {"flag_value": "blank", "default": ""}),
+            ],
+            [],
+            "",
+            id="default-true-vs-empty-string-last-wins",
+        ),
+        pytest.param(
+            [
+                ("--blank", {"flag_value": "blank", "default": ""}),
+                ("--upper", {"flag_value": "upper", "default": True}),
+            ],
+            [],
+            "upper",
+            id="default-true-vs-empty-string-last-wins-swapped",
+        ),
+    ],
+)
+def test_flag_group_competition_non_boolean(runner, opts, args, expected):
+    """Same arbitration rules as :func:`test_bool_flag_group_competition`,
+    but for feature-switch groups with non-boolean ``flag_value``.
+    """
+
+    @click.command()
+    def cli(case):
+        click.echo(repr(case), nl=False)
+
+    for opt_name, opt_kwargs in opts:
+        cli = click.option(opt_name, "case", **opt_kwargs)(cli)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("default_a", "default_b", "args", "expected"),
+    [
+        # ``default=UNSET`` and an absent ``default`` keyword must produce
+        # identical behavior. Both options here are bare boolean flags, so
+        # both auto-derive ``False`` and last-wins applies (``--a`` is
+        # processed last); the value is ``False`` either way.
+        (UNSET, UNSET, [], False),
+        # ``default=UNSET`` on one side, explicit on the other: the explicit
+        # one wins regardless of decorator order.
+        (UNSET, True, [], True),
+        (True, UNSET, [], True),
+        (UNSET, False, [], False),
+        (False, UNSET, [], False),
+        # ``default=None`` is a real value, distinct from ``UNSET``, and
+        # remains explicit even when the sibling carries an explicit
+        # boolean default (3-state).
+        (None, UNSET, [], None),
+        (UNSET, None, [], None),
+        # Explicit ``None`` competing with explicit boolean. The decorator
+        # order in this test puts ``--a`` last in ``params``, so the value
+        # carried by ``default_a`` wins these "both explicit" ties under
+        # last-wins.
+        (None, True, [], None),
+        (True, None, [], True),
+    ],
+)
+def test_flag_group_unset_vs_none_vs_explicit(
+    runner, default_a, default_b, args, expected
+):
+    """``UNSET`` as an explicit ``default`` must be indistinguishable from
+    omitting ``default`` entirely, while ``None`` is a real explicit value.
+    """
+    a_kwargs = {"flag_value": True}
+    if default_a is not UNSET:
+        a_kwargs["default"] = default_a
+    elif default_a is UNSET:
+        # Pass UNSET explicitly to verify it's treated as absent. Skip when
+        # the test wants the absent-keyword case (matches default behavior
+        # because ``Parameter.__init__`` defaults ``default`` to ``UNSET``).
+        a_kwargs["default"] = UNSET
+
+    b_kwargs = {"flag_value": False}
+    if default_b is not UNSET:
+        b_kwargs["default"] = default_b
+    elif default_b is UNSET:
+        b_kwargs["default"] = UNSET
+
+    @click.command()
+    @click.option("--b", "state", **b_kwargs)
+    @click.option("--a", "state", **a_kwargs)
+    def cli(state):
+        click.echo(repr(state), nl=False)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+def test_flag_group_competition_duplicate_option_name(runner):
+    """The same option name declared twice on the same command is a user
+    error.
+    """
+
+    @click.command()
+    @click.option("--xyz", default="first")
+    @click.option("--xyz", default="second")
+    def cli(xyz):
+        click.echo(repr(xyz), nl=False)
+
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, UserWarning)
+    assert "used more than once" in str(result.exception)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--with-xyz", "--with-xyz"], True),
+        (["--without-xyz", "--without-xyz"], False),
+        (["--with-xyz", "--without-xyz", "--with-xyz"], True),
+        (["--without-xyz", "--with-xyz", "--without-xyz"], False),
+    ],
+)
+def test_flag_group_competition_repeated_cmdline(runner, args, expected):
+    """Duplicate flags passed in different order to the CLI."""
+
+    @click.command()
+    @click.option("--without-xyz", "enable_xyz", flag_value=False)
+    @click.option("--with-xyz", "enable_xyz", flag_value=True, default=True)
+    def cli(enable_xyz):
+        click.echo(repr(enable_xyz), nl=False)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("opts", "args", "expected"),
+    [
+        pytest.param(
+            [
+                ("--a", {"flag_value": "a"}),
+                ("--b", {"flag_value": "b"}),
+                ("--c", {"flag_value": "c"}),
+                ("--d", {"flag_value": "d"}),
+            ],
+            [],
+            None,
+            id="four-flags-no-defaults-resolves-to-none",
+        ),
+        pytest.param(
+            [
+                ("--a", {"flag_value": "a"}),
+                ("--b", {"flag_value": "b", "default": "from-b"}),
+                ("--c", {"flag_value": "c"}),
+                ("--d", {"flag_value": "d"}),
+            ],
+            [],
+            "from-b",
+            id="four-flags-only-second-explicit-wins",
+        ),
+        pytest.param(
+            [
+                ("--a", {"flag_value": "a"}),
+                ("--b", {"flag_value": "b", "default": "from-b"}),
+                ("--c", {"flag_value": "c"}),
+                ("--d", {"flag_value": "d", "default": "from-d"}),
+            ],
+            [],
+            "from-d",
+            id="four-flags-two-explicit-last-wins",
+        ),
+        pytest.param(
+            [
+                ("--a", {"flag_value": "a"}),
+                ("--b", {"flag_value": "b"}),
+                ("--c", {"flag_value": "c"}),
+                ("--d", {"flag_value": "d"}),
+            ],
+            ["--c"],
+            "c",
+            id="four-flags-cmdline-beats-everything",
+        ),
+    ],
+)
+def test_flag_group_competition_four_flags(runner, opts, args, expected):
+    """Arbitration rules applies to groups of any size."""
+
+    @click.command()
+    def cli(case):
+        click.echo(repr(case), nl=False)
+
+    for opt_name, opt_kwargs in opts:
+        cli = click.option(opt_name, "case", **opt_kwargs)(cli)
+
+    result = runner.invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("env", "default_map", "args", "expected"),
+    [
+        # ``auto_envvar_prefix`` produces an ``ENVIRONMENT`` source through a
+        # different code path than an explicit ``envvar=`` keyword. It still
+        # must beat any sibling default and be beaten by command-line input.
+        pytest.param(
+            {"AUTO_ENABLE_XYZ": "1"},
+            None,
+            [],
+            True,
+            id="auto-envvar-prefix-beats-default",
+        ),
+        pytest.param(
+            {"AUTO_ENABLE_XYZ": "1"},
+            None,
+            ["--without-xyz"],
+            False,
+            id="auto-envvar-prefix-loses-to-cmdline",
+        ),
+        # ``Sentinel.UNSET`` in ``default_map`` must be skipped (#3224
+        # carve-out): the lookup falls through to the parameter default.
+        # Inside a feature switch group, the explicit ``default=True`` on
+        # ``--with-xyz`` then wins over the sibling's auto-``False``.
+        pytest.param(
+            {},
+            {"enable_xyz": UNSET},
+            [],
+            True,
+            id="unset-default-map-falls-through-to-explicit-default",
+        ),
+        pytest.param(
+            {},
+            {"enable_xyz": False},
+            [],
+            False,
+            id="real-default-map-beats-explicit-default",
+        ),
+    ],
+)
+def test_flag_group_competition_envvar_prefix_and_unset_default_map(
+    runner, monkeypatch, env, default_map, args, expected
+):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    @click.command()
+    @click.option("--without-xyz", "enable_xyz", flag_value=False)
+    @click.option("--with-xyz", "enable_xyz", flag_value=True, default=True)
+    def cli(enable_xyz):
+        click.echo(repr(enable_xyz), nl=False)
+
+    invoke_kwargs = {"auto_envvar_prefix": "AUTO"}
+    if default_map is not None:
+        invoke_kwargs["default_map"] = default_map
+
+    result = runner.invoke(cli, args, **invoke_kwargs)
+    assert result.exit_code == 0, result.output
+    assert result.output == repr(expected)
+
+
+@pytest.mark.parametrize(
+    ("flag_type", "args", "expect_output"),
+    [
+        (str, [], "Default\n"),
+        (str, ["--theflag"], "FlagValue\n"),
+        (str, ["--theflag", "value"], "value\n"),
+        (int, [], "0\n"),
+        (int, ["--theflag"], "1\n"),
+        (int, ["--theflag", "2"], "2\n"),
+    ],
+)
+def test_flag_value_on_option_with_zero_or_one_args(flag_type, args, expect_output):
+    """An option with flag_value and is_flag=False can be
+    omitted or used with 0 or 1 args.
+
+    Regression test for https://github.com/pallets/click/issues/3084
+    """
+    if flag_type is str:
+        flagopt = click.option(
+            "--theflag",
+            type=str,
+            is_flag=False,
+            flag_value="FlagValue",
+            default="Default",
+        )
+    elif flag_type is int:
+        flagopt = click.option(
+            "--theflag", type=int, is_flag=False, flag_value=1, default=0
+        )
+    else:
+        raise NotImplementedError(flag_type)
+
+    @click.command()
+    @flagopt
+    def cmd(theflag):
+        click.echo(theflag)
+
+    runner = CliRunner()
+    result = runner.invoke(cmd, args)
+    assert result.exit_code == 0
+    assert result.output == expect_output
+
+```
+---
+
+## tests/test_parser.py
+
+```python
+import pytest
+
+import click
+from click.parser import _OptionParser
+from click.shell_completion import split_arg_string
+
+
+@pytest.mark.parametrize(
+    ("value", "expect"),
+    [
+        ("cli a b c", ["cli", "a", "b", "c"]),
+        ("cli 'my file", ["cli", "my file"]),
+        ("cli 'my file'", ["cli", "my file"]),
+        ("cli my\\", ["cli", "my"]),
+        ("cli my\\ file", ["cli", "my file"]),
+    ],
+)
+def test_split_arg_string(value, expect):
+    assert split_arg_string(value) == expect
+
+
+def test_parser_default_prefixes():
+    parser = _OptionParser()
+    assert parser._opt_prefixes == {"-", "--"}
+
+
+def test_parser_collects_prefixes():
+    ctx = click.Context(click.Command("test"))
+    parser = _OptionParser(ctx)
+    click.Option("+p", is_flag=True).add_to_parser(parser, ctx)
+    click.Option("!e", is_flag=True).add_to_parser(parser, ctx)
+    assert parser._opt_prefixes == {"-", "--", "+", "!"}
+
+```
+---
+
+## tests/test_shell_completion.py
+
+```python
+import io
+import textwrap
+import warnings
+from collections.abc import Mapping
+
+import pytest
+
+import click.shell_completion
+from click.core import Argument
+from click.core import Command
+from click.core import Group
+from click.core import Option
+from click.shell_completion import add_completion_class
+from click.shell_completion import CompletionItem
+from click.shell_completion import shell_complete
+from click.shell_completion import ShellComplete
+from click.types import Choice
+from click.types import File
+from click.types import Path
+
+
+def _get_completions(cli, args, incomplete):
+    comp = ShellComplete(cli, {}, cli.name, "_CLICK_COMPLETE")
+    return comp.get_completions(args, incomplete)
+
+
+def _get_words(cli, args, incomplete):
+    return [c.value for c in _get_completions(cli, args, incomplete)]
+
+
+def test_command():
+    cli = Command("cli", params=[Option(["-t", "--test"])])
+    assert _get_words(cli, [], "") == []
+    assert _get_words(cli, [], "-") == ["-t", "--test", "--help"]
+    assert _get_words(cli, [], "--") == ["--test", "--help"]
+    assert _get_words(cli, [], "--t") == ["--test"]
+    # -t has been seen, so --test isn't suggested
+    assert _get_words(cli, ["-t", "a"], "-") == ["--help"]
+
+
+def test_group():
+    cli = Group("cli", params=[Option(["-a"])], commands=[Command("x"), Command("y")])
+    assert _get_words(cli, [], "") == ["x", "y"]
+    assert _get_words(cli, [], "-") == ["-a", "--help"]
+
+
+@pytest.mark.parametrize(
+    ("args", "word", "expect"),
+    [
+        ([], "", ["get"]),
+        (["get"], "", ["full"]),
+        (["get", "full"], "", ["data"]),
+        (["get", "full"], "-", ["--verbose", "--help"]),
+        (["get", "full", "data"], "", []),
+        (["get", "full", "data"], "-", ["-a", "--help"]),
+    ],
+)
+def test_nested_group(args: list[str], word: str, expect: list[str]) -> None:
+    cli = Group(
+        "cli",
+        commands=[
+            Group(
+                "get",
+                commands=[
+                    Group(
+                        "full",
+                        params=[Option(["--verbose"])],
+                        commands=[Command("data", params=[Option(["-a"])])],
+                    )
+                ],
+            )
+        ],
+    )
+    assert _get_words(cli, args, word) == expect
+
+
+def test_group_command_same_option():
+    cli = Group(
+        "cli", params=[Option(["-a"])], commands=[Command("x", params=[Option(["-a"])])]
+    )
+    assert _get_words(cli, [], "-") == ["-a", "--help"]
+    assert _get_words(cli, ["-a", "a"], "-") == ["--help"]
+    assert _get_words(cli, ["-a", "a", "x"], "-") == ["-a", "--help"]
+    assert _get_words(cli, ["-a", "a", "x", "-a", "a"], "-") == ["--help"]
+
+
+def test_chained():
+    cli = Group(
+        "cli",
+        chain=True,
+        commands=[
+            Command("set", params=[Option(["-y"])]),
+            Command("start"),
+            Group("get", commands=[Command("full")]),
+        ],
+    )
+    assert _get_words(cli, [], "") == ["get", "set", "start"]
+    assert _get_words(cli, [], "s") == ["set", "start"]
+    assert _get_words(cli, ["set", "start"], "") == ["get"]
+    # subcommands and parent subcommands
+    assert _get_words(cli, ["get"], "") == ["full", "set", "start"]
+    assert _get_words(cli, ["get", "full"], "") == ["set", "start"]
+    assert _get_words(cli, ["get"], "s") == ["set", "start"]
+
+
+def test_help_option():
+    cli = Group("cli", commands=[Command("with"), Command("no", add_help_option=False)])
+    assert _get_words(cli, ["with"], "--") == ["--help"]
+    assert _get_words(cli, ["no"], "--") == []
+
+
+def test_argument_order():
+    cli = Command(
+        "cli",
+        params=[
+            Argument(["plain"]),
+            Argument(["c1"], type=Choice(["a1", "a2", "b"])),
+            Argument(["c2"], type=Choice(["c1", "c2", "d"])),
+        ],
+    )
+    # first argument has no completions
+    assert _get_words(cli, [], "") == []
+    assert _get_words(cli, [], "a") == []
+    # first argument filled, now completion can happen
+    assert _get_words(cli, ["x"], "a") == ["a1", "a2"]
+    assert _get_words(cli, ["x", "b"], "d") == ["d"]
+
+
+def test_argument_default():
+    cli = Command(
+        "cli",
+        add_help_option=False,
+        params=[
+            Argument(["a"], type=Choice(["a"]), default="a"),
+            Argument(["b"], type=Choice(["b"]), default="b"),
+        ],
+    )
+    assert _get_words(cli, [], "") == ["a"]
+    assert _get_words(cli, ["a"], "b") == ["b"]
+    # ignore type validation
+    assert _get_words(cli, ["x"], "b") == ["b"]
+
+
+def test_type_choice():
+    cli = Command("cli", params=[Option(["-c"], type=Choice(["a1", "a2", "b"]))])
+    assert _get_words(cli, ["-c"], "") == ["a1", "a2", "b"]
+    assert _get_words(cli, ["-c"], "a") == ["a1", "a2"]
+    assert _get_words(cli, ["-c"], "a2") == ["a2"]
+
+
+def test_choice_special_characters():
+    cli = Command("cli", params=[Option(["-c"], type=Choice(["!1", "!2", "+3"]))])
+    assert _get_words(cli, ["-c"], "") == ["!1", "!2", "+3"]
+    assert _get_words(cli, ["-c"], "!") == ["!1", "!2"]
+    assert _get_words(cli, ["-c"], "!2") == ["!2"]
+
+
+def test_choice_conflicting_prefix():
+    cli = Command(
+        "cli",
+        params=[
+            Option(["-c"], type=Choice(["!1", "!2", "+3"])),
+            Option(["+p"], is_flag=True),
+        ],
+    )
+    assert _get_words(cli, ["-c"], "") == ["!1", "!2", "+3"]
+    assert _get_words(cli, ["-c"], "+") == ["+p"]
+
+
+def test_option_count():
+    cli = Command("cli", params=[Option(["-c"], count=True)])
+    assert _get_words(cli, ["-c"], "") == []
+    assert _get_words(cli, ["-c"], "-") == ["--help"]
+
+
+def test_option_optional():
+    cli = Command(
+        "cli",
+        add_help_option=False,
+        params=[
+            Option(["--name"], is_flag=False, flag_value="value"),
+            Option(["--flag"], is_flag=True),
+        ],
+    )
+    assert _get_words(cli, ["--name"], "") == []
+    assert _get_words(cli, ["--name"], "-") == ["--flag"]
+    assert _get_words(cli, ["--name", "--flag"], "-") == []
+
+
+@pytest.mark.parametrize(
+    ("type", "expect"),
+    [(File(), "file"), (Path(), "file"), (Path(file_okay=False), "dir")],
+)
+def test_path_types(type, expect):
+    cli = Command("cli", params=[Option(["-f"], type=type)])
+    out = _get_completions(cli, ["-f"], "ab")
+    assert len(out) == 1
+    c = out[0]
+    assert c.value == "ab"
+    assert c.type == expect
+
+
+def test_absolute_path():
+    cli = Command("cli", params=[Option(["-f"], type=Path())])
+    out = _get_completions(cli, ["-f"], "/ab")
+    assert len(out) == 1
+    c = out[0]
+    assert c.value == "/ab"
+
+
+def test_option_flag():
+    cli = Command(
+        "cli",
+        add_help_option=False,
+        params=[
+            Option(["--on/--off"]),
+            Argument(["a"], type=Choice(["a1", "a2", "b"])),
+        ],
+    )
+    assert _get_words(cli, [], "--") == ["--on", "--off"]
+    # flag option doesn't take value, use choice argument
+    assert _get_words(cli, ["--on"], "a") == ["a1", "a2"]
+
+
+def test_flag_option_with_nargs_option():
+    cli = Command(
+        "cli",
+        add_help_option=False,
+        params=[
+            Argument(["a"], type=Choice(["a1", "a2", "b"])),
+            Option(["--flag"], is_flag=True),
+            Option(["-c"], type=Choice(["p", "q"]), nargs=2),
+        ],
+    )
+    assert _get_words(cli, ["a1", "--flag", "-c"], "") == ["p", "q"]
+
+
+def test_option_custom():
+    def custom(ctx, param, incomplete):
+        return [incomplete.upper()]
+
+    cli = Command(
+        "cli",
+        params=[
+            Argument(["x"]),
+            Argument(["y"]),
+            Argument(["z"], shell_complete=custom),
+        ],
+    )
+    assert _get_words(cli, ["a", "b"], "") == [""]
+    assert _get_words(cli, ["a", "b"], "c") == ["C"]
+
+
+def test_option_multiple():
+    cli = Command(
+        "type",
+        params=[Option(["-m"], type=Choice(["a", "b"]), multiple=True), Option(["-f"])],
+    )
+    assert _get_words(cli, ["-m"], "") == ["a", "b"]
+    assert "-m" in _get_words(cli, ["-m", "a"], "-")
+    assert _get_words(cli, ["-m", "a", "-m"], "") == ["a", "b"]
+    # used single options aren't suggested again
+    assert "-c" not in _get_words(cli, ["-c", "f"], "-")
+
+
+def test_option_nargs():
+    cli = Command("cli", params=[Option(["-c"], type=Choice(["a", "b"]), nargs=2)])
+    assert _get_words(cli, ["-c"], "") == ["a", "b"]
+    assert _get_words(cli, ["-c", "a"], "") == ["a", "b"]
+    assert _get_words(cli, ["-c", "a", "b"], "") == []
+
+
+def test_argument_nargs():
+    cli = Command(
+        "cli",
+        params=[
+            Argument(["x"], type=Choice(["a", "b"]), nargs=2),
+            Argument(["y"], type=Choice(["c", "d"]), nargs=-1),
+            Option(["-z"]),
+        ],
+    )
+    assert _get_words(cli, [], "") == ["a", "b"]
+    assert _get_words(cli, ["a"], "") == ["a", "b"]
+    assert _get_words(cli, ["a", "b"], "") == ["c", "d"]
+    assert _get_words(cli, ["a", "b", "c"], "") == ["c", "d"]
+    assert _get_words(cli, ["a", "b", "c", "d"], "") == ["c", "d"]
+    assert _get_words(cli, ["a", "-z", "1"], "") == ["a", "b"]
+    assert _get_words(cli, ["a", "-z", "1", "b"], "") == ["c", "d"]
+
+
+def test_double_dash():
+    cli = Command(
+        "cli",
+        add_help_option=False,
+        params=[
+            Option(["--opt"]),
+            Argument(["name"], type=Choice(["name", "--", "-o", "--opt"])),
+        ],
+    )
+    assert _get_words(cli, [], "-") == ["--opt"]
+    assert _get_words(cli, ["value"], "-") == ["--opt"]
+    assert _get_words(cli, [], "") == ["name", "--", "-o", "--opt"]
+    assert _get_words(cli, ["--"], "") == ["name", "--", "-o", "--opt"]
+
+
+def test_hidden():
+    cli = Group(
+        "cli",
+        commands=[
+            Command(
+                "hidden",
+                add_help_option=False,
+                hidden=True,
+                params=[
+                    Option(["-a"]),
+                    Option(["-b"], type=Choice(["a", "b"]), hidden=True),
+                ],
+            )
+        ],
+    )
+    assert "hidden" not in _get_words(cli, [], "")
+    assert "hidden" not in _get_words(cli, [], "hidden")
+    assert _get_words(cli, ["hidden"], "-") == ["-a"]
+    assert _get_words(cli, ["hidden", "-b"], "") == ["a", "b"]
+
+
+def test_add_different_name():
+    cli = Group("cli", commands={"renamed": Command("original")})
+    words = _get_words(cli, [], "")
+    assert "renamed" in words
+    assert "original" not in words
+
+
+def test_completion_item_data():
+    c = CompletionItem("test", a=1)
+    assert c.a == 1
+    assert c.b is None
+
+
+@pytest.fixture()
+def _patch_for_completion(monkeypatch):
+    monkeypatch.setattr(
+        "click.shell_completion.BashComplete._check_version", lambda self: True
+    )
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+@pytest.mark.usefixtures("_patch_for_completion")
+def test_full_source(runner, shell):
+    cli = Group("cli", commands=[Command("a"), Command("b")])
+    result = runner.invoke(cli, env={"_CLI_COMPLETE": f"{shell}_source"})
+    assert f"_CLI_COMPLETE={shell}_complete" in result.output
+
+
+@pytest.mark.parametrize(
+    ("shell", "env", "expect"),
+    [
+        ("bash", {"COMP_WORDS": "", "COMP_CWORD": "0"}, "plain,a\nplain,b\n"),
+        ("bash", {"COMP_WORDS": "a b", "COMP_CWORD": "1"}, "plain,b\n"),
+        ("zsh", {"COMP_WORDS": "", "COMP_CWORD": "0"}, "plain\na\n_\nplain\nb\nbee\n"),
+        ("zsh", {"COMP_WORDS": "a b", "COMP_CWORD": "1"}, "plain\nb\nbee\n"),
+        ("fish", {"COMP_WORDS": "", "COMP_CWORD": ""}, "plain\na\n_\nplain\nb\nbee\n"),
+        ("fish", {"COMP_WORDS": "a b", "COMP_CWORD": "b"}, "plain\nb\nbee\n"),
+        ("fish", {"COMP_WORDS": 'a "b', "COMP_CWORD": '"b'}, "plain\nb\nbee\n"),
+    ],
+)
+@pytest.mark.usefixtures("_patch_for_completion")
+def test_full_complete(runner, shell, env, expect):
+    cli = Group("cli", commands=[Command("a"), Command("b", help="bee")])
+    env["_CLI_COMPLETE"] = f"{shell}_complete"
+    result = runner.invoke(cli, env=env)
+    assert result.output == expect
+
+
+def test_source_uses_lf_line_endings(monkeypatch):
+    stdout = io.BytesIO()
+    stream = io.TextIOWrapper(stdout, encoding="utf-8", newline="\r\n")
+    monkeypatch.setattr("click.utils._default_text_stdout", lambda: stream)
+
+    cli = Group("cli", commands=[Command("a"), Command("b")])
+    assert shell_complete(cli, {}, "cli", "_CLI_COMPLETE", "zsh_source") == 0
+
+    stream.flush()
+    output = stdout.getvalue()
+    assert b"\r\n" not in output
+    assert b"\n" in output
+
+
+@pytest.mark.parametrize(
+    ("env", "expect"),
+    [
+        (
+            {"COMP_WORDS": "", "COMP_CWORD": "0"},
+            textwrap.dedent(
+                """\
+                    plain
+                    a
+                    _
+                    plain
+                    b
+                    bee
+                    plain
+                    c\\:d
+                    cee:dee
+                    plain
+                    c:e
+                    _
+                """
+            ),
+        ),
+        (
+            {"COMP_WORDS": "a c", "COMP_CWORD": "1"},
+            textwrap.dedent(
+                """\
+                    plain
+                    c\\:d
+                    cee:dee
+                    plain
+                    c:e
+                    _
+                """
+            ),
+        ),
+        (
+            {"COMP_WORDS": "a c:", "COMP_CWORD": "1"},
+            textwrap.dedent(
+                """\
+                    plain
+                    c\\:d
+                    cee:dee
+                    plain
+                    c:e
+                    _
+                """
+            ),
+        ),
+    ],
+)
+@pytest.mark.usefixtures("_patch_for_completion")
+def test_zsh_full_complete_with_colons(
+    runner, env: Mapping[str, str], expect: str
+) -> None:
+    cli = Group(
+        "cli",
+        commands=[
+            Command("a"),
+            Command("b", help="bee"),
+            Command("c:d", help="cee:dee"),
+            Command("c:e"),
+        ],
+    )
+    result = runner.invoke(
+        cli,
+        env={
+            **env,
+            "_CLI_COMPLETE": "zsh_complete",
+        },
+    )
+    assert result.output == expect
+
+
+@pytest.mark.usefixtures("_patch_for_completion")
+def test_context_settings(runner):
+    def complete(ctx, param, incomplete):
+        return ctx.obj["choices"]
+
+    cli = Command("cli", params=[Argument("x", shell_complete=complete)])
+    result = runner.invoke(
+        cli,
+        obj={"choices": ["a", "b"]},
+        env={"COMP_WORDS": "", "COMP_CWORD": "0", "_CLI_COMPLETE": "bash_complete"},
+    )
+    assert result.output == "plain,a\nplain,b\n"
+
+
+# case_sensitive=False normalizes values to lowercase, matching remains case insensitive
+@pytest.mark.parametrize(("value", "expect"), [(False, ["au", "al"]), (True, ["al"])])
+def test_choice_case_sensitive(value, expect):
+    cli = Command(
+        "cli",
+        params=[Option(["-a"], type=Choice(["Au", "al", "Bc"], case_sensitive=value))],
+    )
+    completions = _get_words(cli, ["-a"], "a")
+    assert completions == expect
+
+
+@pytest.fixture()
+def _restore_available_shells(tmpdir):
+    prev_available_shells = click.shell_completion._available_shells.copy()
+    click.shell_completion._available_shells.clear()
+    yield
+    click.shell_completion._available_shells.clear()
+    click.shell_completion._available_shells.update(prev_available_shells)
+
+
+@pytest.mark.usefixtures("_restore_available_shells")
+def test_add_completion_class():
+    # At first, "mysh" is not in available shells
+    assert "mysh" not in click.shell_completion._available_shells
+
+    class MyshComplete(ShellComplete):
+        name = "mysh"
+        source_template = "dummy source"
+
+    # "mysh" still not in available shells because it is not registered
+    assert "mysh" not in click.shell_completion._available_shells
+
+    # Adding a completion class should return that class
+    assert add_completion_class(MyshComplete) is MyshComplete
+
+    # Now, "mysh" is finally in available shells
+    assert "mysh" in click.shell_completion._available_shells
+    assert click.shell_completion._available_shells["mysh"] is MyshComplete
+
+
+@pytest.mark.usefixtures("_restore_available_shells")
+def test_add_completion_class_with_name():
+    # At first, "mysh" is not in available shells
+    assert "mysh" not in click.shell_completion._available_shells
+    assert "not_mysh" not in click.shell_completion._available_shells
+
+    class MyshComplete(ShellComplete):
+        name = "not_mysh"
+        source_template = "dummy source"
+
+    # "mysh" and "not_mysh" are still not in available shells because
+    # it is not registered yet
+    assert "mysh" not in click.shell_completion._available_shells
+    assert "not_mysh" not in click.shell_completion._available_shells
+
+    # Adding a completion class should return that class.
+    # Because we are using the "name" parameter, the name isn't taken
+    # from the class.
+    assert add_completion_class(MyshComplete, name="mysh") is MyshComplete
+
+    # Now, "mysh" is finally in available shells
+    assert "mysh" in click.shell_completion._available_shells
+    assert "not_mysh" not in click.shell_completion._available_shells
+    assert click.shell_completion._available_shells["mysh"] is MyshComplete
+
+
+@pytest.mark.usefixtures("_restore_available_shells")
+def test_add_completion_class_decorator():
+    # At first, "mysh" is not in available shells
+    assert "mysh" not in click.shell_completion._available_shells
+
+    @add_completion_class
+    class MyshComplete(ShellComplete):
+        name = "mysh"
+        source_template = "dummy source"
+
+    # Using `add_completion_class` as a decorator adds the new shell immediately
+    assert "mysh" in click.shell_completion._available_shells
+    assert click.shell_completion._available_shells["mysh"] is MyshComplete
+
+
+# Don't make the ResourceWarning give an error
+@pytest.mark.filterwarnings("default")
+def test_files_closed(runner) -> None:
+    with runner.isolated_filesystem():
+        config_file = "foo.txt"
+        with open(config_file, "w") as f:
+            f.write("bar")
+
+        @click.group()
+        @click.option(
+            "--config-file",
+            default=config_file,
+            type=click.File(mode="r"),
+        )
+        @click.pass_context
+        def cli(ctx, config_file):
+            pass
+
+        with warnings.catch_warnings(record=True) as current_warnings:
+            assert not current_warnings, "There should be no warnings to start"
+            _get_completions(cli, args=[], incomplete="")
+            assert not current_warnings, "There should be no warnings after either"
+
+
+@pytest.mark.usefixtures("_patch_for_completion")
+def test_fish_multiline_help_complete(runner):
+    """Test Fish completion with multi-line help text doesn't cause errors."""
+    cli = Command(
+        "cli",
+        params=[
+            Option(
+                ["--at", "--attachment-type"],
+                type=(str, str),
+                multiple=True,
+                help=(
+                    "\b\nAttachment with explicit mimetype,\n--at image.jpg image/jpeg"
+                ),
+            ),
+            Option(["--other"], help="Normal help"),
+        ],
+    )
+
+    result = runner.invoke(
+        cli,
+        env={
+            "COMP_WORDS": "cli --",
+            "COMP_CWORD": "--",
+            "_CLI_COMPLETE": "fish_complete",
+        },
+    )
+
+    # Should not fail
+    assert result.exit_code == 0
+
+    # Output should contain escaped newlines, not literal newlines
+    # Fish expects: plain\n--at\n{help_with_\\n}
+    lines = result.output.split("\n")
+
+    # Find the --at completion block (3 lines: type, value, help)
+    for i in range(0, len(lines) - 2, 3):
+        if lines[i] == "plain" and lines[i + 1] in ("--at", "--attachment-type"):
+            help_line = lines[i + 2]
+            # Help should have escaped newlines (\\n), not actual newlines
+            assert "\\n" in help_line
+            # Should contain the example text
+            assert "image.jpg" in help_line.replace("\\n", " ")
+            break
+    else:
+        pytest.fail("--at completion not found in output")
+
+```
+---
+
+## tests/test_stream_lifecycle.py
+
+```python
+"""Tests for ``CliRunner`` stream lifecycle and ownership.
+
+Covers the stream management bugs tracked across:
+- Issue #824: ``ValueError`` on closed file when logging interacts with ``CliRunner``
+- Issue #2993: Race condition in ``StreamMixer`` finalization (multi-threaded)
+- Issue #3110: Regression from PR #2991's ``__del__`` fix breaking logging
+- PR #3139: The fix - prevent ``_NamedTextIOWrapper`` from closing owned buffers
+
+The tests are organized by category:
+
+1. Stream ownership: ``_NamedTextIOWrapper`` must not close buffers it wraps
+2. ``StreamMixer`` lifecycle: buffers survive wrapper garbage collection
+3. Logging interaction: ``CliRunner`` works with active logging handlers
+4. Multi-threaded safety: concurrent threads don't cause I/O-on-closed-file
+5. Sequential invocations: multiple ``invoke()`` calls don't corrupt state
+6. Stress tests (marked ``stress``): high-iteration reproducers for races
+
+How to run locally
+------------------
+
+Standard tests (fast, ~0.8s) with stress tests excluded by default:
+
+.. code-block:: shell-session
+
+    $ pytest tests/test_stream_lifecycle.py -v
+
+Stress tests only (30k iterations, ~52min):
+
+.. code-block:: shell-session
+
+    $ pytest tests/test_stream_lifecycle.py -m stress -x --override-ini="addopts="
+
+Everything:
+
+.. code-block:: shell-session
+
+    $ pytest tests/test_stream_lifecycle.py --override-ini="addopts=" -x
+"""
+
+from __future__ import annotations
+
+import gc
+import io
+import logging
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+import click
+from click.testing import _NamedTextIOWrapper
+from click.testing import BytesIOCopy
+from click.testing import CliRunner
+from click.testing import StreamMixer
+
+# ---------------------------------------------------------------------------
+# Category 1: Stream ownership - ``_NamedTextIOWrapper`` must not close buffers
+# ---------------------------------------------------------------------------
+
+
+def test_wrapper_close_does_not_close_underlying_buffer():
+    """Calling ``close()`` on the wrapper must leave the buffer open."""
+    buf = io.BytesIO()
+    wrapper = _NamedTextIOWrapper(buf, encoding="utf-8", name="t", mode="w")
+    wrapper.write("hello")
+    wrapper.flush()
+    wrapper.close()
+    assert not buf.closed
+    assert buf.getvalue() == b"hello"
+
+
+def test_wrapper_del_does_not_close_underlying_buffer():
+    """Garbage-collecting the wrapper must leave the buffer open."""
+    buf = io.BytesIO()
+    wrapper = _NamedTextIOWrapper(buf, encoding="utf-8", name="t", mode="w")
+    wrapper.write("world")
+    wrapper.flush()
+    del wrapper
+    gc.collect()
+    assert not buf.closed
+    assert buf.getvalue() == b"world"
+
+
+def test_multiple_wrappers_same_buffer():
+    """Multiple wrappers on the same buffer can be closed independently."""
+    buf = io.BytesIO()
+    w1 = _NamedTextIOWrapper(buf, encoding="utf-8", name="a", mode="w")
+    w2 = _NamedTextIOWrapper(buf, encoding="utf-8", name="b", mode="w")
+    w1.write("one")
+    w1.flush()
+    w1.close()
+    # buf survives, second wrapper can still write
+    w2.write("two")
+    w2.flush()
+    w2.close()
+    assert not buf.closed
+    assert buf.getvalue() == b"onetwo"
+
+
+def test_wrapper_preserves_name_and_mode():
+    buf = io.BytesIO()
+    wrapper = _NamedTextIOWrapper(buf, encoding="utf-8", name="<stdout>", mode="w")
+    assert wrapper.name == "<stdout>"
+    assert wrapper.mode == "w"
+
+
+# ---------------------------------------------------------------------------
+# Category 2: ``StreamMixer`` lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_mixer_buffers_survive_wrapper_gc():
+    """After wrappers are garbage-collected, mixer buffers remain open."""
+    mixer = StreamMixer()
+    out_w = _NamedTextIOWrapper(
+        mixer.stdout, encoding="utf-8", name="<stdout>", mode="w"
+    )
+    err_w = _NamedTextIOWrapper(
+        mixer.stderr, encoding="utf-8", name="<stderr>", mode="w"
+    )
+    out_w.write("out")
+    out_w.flush()
+    err_w.write("err")
+    err_w.flush()
+
+    del out_w, err_w
+    gc.collect()
+
+    assert not mixer.stdout.closed
+    assert not mixer.stderr.closed
+    assert not mixer.output.closed
+    assert mixer.stdout.getvalue() == b"out"
+    assert mixer.stderr.getvalue() == b"err"
+    assert mixer.output.getvalue() == b"outerr"
+
+
+def test_getvalue_after_isolation_exit():
+    """After the isolation context exits, stream values are readable."""
+    runner = CliRunner()
+
+    @click.command()
+    def cli():
+        click.echo("stdout-msg")
+        click.echo("stderr-msg", err=True)
+
+    result = runner.invoke(cli)
+    assert result.exit_code == 0
+    assert result.stdout == "stdout-msg\n"
+    assert result.stderr == "stderr-msg\n"
+    assert "stdout-msg" in result.output
+    assert "stderr-msg" in result.output
+
+
+def test_no_streammixer_del():
+    """``StreamMixer`` should not have a ``__del__`` method.
+
+    PR #2991 added ``__del__`` which caused issue #3110. PR #3139 removes it.
+    """
+    has_del = hasattr(StreamMixer, "__del__")
+    if has_del:
+        assert StreamMixer.__del__ is object.__del__  # type: ignore[attr-defined]
+
+
+def test_bytesiocopy_writes_to_both():
+    """``BytesIOCopy`` writes to itself and to ``copy_to``."""
+    target = io.BytesIO()
+    copier = BytesIOCopy(copy_to=target)
+    copier.write(b"data")
+    copier.flush()
+    assert copier.getvalue() == b"data"
+    assert target.getvalue() == b"data"
+
+
+def test_bytesiocopy_flush_propagates():
+    """``BytesIOCopy.flush()`` also flushes ``copy_to``."""
+    target = io.BytesIO()
+    copier = BytesIOCopy(copy_to=target)
+    copier.write(b"abc")
+    copier.flush()
+    assert target.getvalue() == b"abc"
+
+
+# ---------------------------------------------------------------------------
+# Category 3: Logging interaction (issues #824, #3110)
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_with_logger_warning():
+    """Basic ``logging.warning()`` inside a command must not crash."""
+    logger = logging.getLogger("test_invoke_with_logger_warning")
+
+    @click.command()
+    def cli():
+        logger.warning("a warning")
+        click.echo("done")
+
+    runner = CliRunner()
+    result = runner.invoke(cli)
+    assert result.exit_code == 0
+    assert "done" in result.output
+
+
+def test_invoke_with_logger_and_prompt():
+    """Logging + prompt (the exact #824 reproducer)."""
+    logger = logging.getLogger("test_invoke_with_logger_and_prompt")
+
+    @click.command()
+    @click.option("--name", prompt="Your name")
+    def hello(name):
+        logger.warning("greeting %s", name)
+        click.echo(f"Hello, {name}!")
+
+    runner = CliRunner()
+    result = runner.invoke(hello, input="Peter")
+    assert result.exit_code == 0
+    assert "Your name:" in result.output
+
+
+def test_sequential_invokes_with_logging():
+    """Multiple sequential ``invoke()`` calls with logging (#3110 reproducer).
+
+    Issue #3110: the ``__del__`` from PR #2991 caused logging failures on
+    the second invocation because the first ``StreamMixer``'s ``__del__`` would
+    close buffers that logging still referenced.
+    """
+    logger = logging.getLogger("test_sequential_invokes_with_logging")
+
+    @click.command()
+    @click.argument("msg")
+    def cli(msg):
+        logger.warning("log: %s", msg)
+        click.echo(msg)
+
+    runner = CliRunner()
+    for i in range(5):
+        result = runner.invoke(cli, [f"msg-{i}"])
+        assert result.exit_code == 0, f"Failed on invocation {i}: {result.exception}"
+        assert f"msg-{i}" in result.output
+
+
+def test_invoke_with_stream_handler_on_stderr():
+    """A ``StreamHandler`` explicitly attached to stderr must survive ``invoke()``."""
+    logger = logging.getLogger("test_stream_handler_stderr")
+    logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler(sys.stderr)
+    logger.addHandler(handler)
     try:
-        click.prompt("Password", hide_input=True)
-    except click.Abort:
-        click.echo("interrupted")
 
-    out, err = capsys.readouterr()
-    assert out == "Password:\ninterrupted\n"
+        @click.command()
+        def cli():
+            logger.info("message from inside invoke")
+            click.echo("ok")
+
+        runner = CliRunner()
+        result = runner.invoke(cli)
+        assert result.exit_code == 0
+        assert "ok" in result.output
+    finally:
+        logger.removeHandler(handler)
 
 
-def test_prompts_eof(runner):
-    """If too few lines of input are given, prompt should exit, not hang."""
+def test_logging_with_cli_log_level():
+    """Simulate what ``--log-cli-level`` does: add a handler to root
+    before invoke.
 
-    @click.command
-    def echo():
-        for _ in range(3):
-            click.echo(click.prompt("", type=int))
+    This reproduces the original #824 scenario without needing pytest
+    CLI flags.
+    """
+    root_logger = logging.getLogger()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.WARNING)
+    root_logger.addHandler(handler)
+    original_level = root_logger.level
+    root_logger.setLevel(logging.WARNING)
+    try:
 
-    # only provide two lines of input for three prompts
-    result = runner.invoke(echo, input="1\n2\n")
+        @click.command()
+        def cli():
+            logging.warning("live log message")
+            click.echo("output")
+
+        runner = CliRunner()
+        result = runner.invoke(cli)
+        assert result.exit_code == 0
+        assert "output" in result.output
+    finally:
+        root_logger.removeHandler(handler)
+        root_logger.setLevel(original_level)
+
+
+# ---------------------------------------------------------------------------
+# Category 4: Multi-threaded safety (issue #2993)
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_with_thread_pool():
+    """Basic ``ThreadPoolExecutor`` usage inside a command."""
+
+    @click.command()
+    def cli():
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(lambda x: x * 2, i) for i in range(4)]
+            results = [f.result() for f in futures]
+        click.echo(f"results={results}")
+
+    runner = CliRunner()
+    result = runner.invoke(cli)
+    assert result.exit_code == 0
+    assert "results=" in result.output
+
+
+def test_invoke_with_threads_writing_to_streams():
+    """Threads writing to ``click.echo()`` during invocation."""
+
+    @click.command()
+    def cli():
+        barrier = threading.Barrier(3)
+
+        def worker(n):
+            barrier.wait(timeout=5)
+            click.echo(f"worker-{n}")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        click.echo("main-done")
+
+    runner = CliRunner()
+    result = runner.invoke(cli)
+    assert result.exit_code == 0
+    assert "main-done" in result.output
+
+
+def test_invoke_with_thread_pool_and_exit():
+    """``ThreadPoolExecutor`` + ``SystemExit`` (the exact #2993 reproducer)."""
+
+    @click.command()
+    @click.argument("args", nargs=-1)
+    def cli(**_kw):
+        with ThreadPoolExecutor() as executor:
+            executor.submit(lambda: None).result()
+        raise SystemExit(1)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["test"])
     assert result.exit_code == 1
 
 
-def _test_gen_func():
-    yield "a"
-    yield "b"
-    yield "c"
-    yield "abc"
+def test_sequential_threaded_invokes():
+    """Multiple sequential invocations with threads don't leak state."""
 
-
-def _test_gen_func_fails():
-    yield "test"
-    raise RuntimeError("This is a test.")
-
-
-def _test_gen_func_echo(file=None):
-    yield "test"
-    click.echo("hello", file=file)
-    yield "test"
-
-
-def _test_simulate_keyboard_interrupt(file=None):
-    yield "output_before_keyboard_interrupt"
-    raise KeyboardInterrupt()
-
-
-EchoViaPagerTest = namedtuple(
-    "EchoViaPagerTest",
-    (
-        "description",
-        "test_input",
-        "expected_pager",
-        "expected_stdout",
-        "expected_stderr",
-        "expected_error",
-    ),
-)
-
-
-@pytest.mark.skipif(WIN, reason="Different behavior on windows.")
-@pytest.mark.parametrize(
-    "pager_cmd", ["cat", "cat ", " cat ", "less", " less", " less "]
-)
-@pytest.mark.parametrize(
-    "test",
-    [
-        # We need to pass a parameter function instead of a plain param
-        # as pytest.mark.parametrize will reuse the parameters causing the
-        # generators to be used up so they will not yield anymore
-        EchoViaPagerTest(
-            description="Plain string argument",
-            test_input=lambda: "just text",
-            expected_pager="just text\n",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=None,
-        ),
-        EchoViaPagerTest(
-            description="Iterable argument",
-            test_input=lambda: ["itera", "ble"],
-            expected_pager="iterable\n",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=None,
-        ),
-        EchoViaPagerTest(
-            description="Generator function argument",
-            test_input=lambda: _test_gen_func,
-            expected_pager="abcabc\n",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=None,
-        ),
-        EchoViaPagerTest(
-            description="String generator argument",
-            test_input=lambda: _test_gen_func(),
-            expected_pager="abcabc\n",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=None,
-        ),
-        EchoViaPagerTest(
-            description="Number generator expression argument",
-            test_input=lambda: (c for c in range(6)),
-            expected_pager="012345\n",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=None,
-        ),
-        EchoViaPagerTest(
-            description="Exception in generator function argument",
-            test_input=lambda: _test_gen_func_fails,
-            # Because generator throws early on, the pager did not have
-            # a chance yet to write the file.
-            expected_pager="",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=RuntimeError,
-        ),
-        EchoViaPagerTest(
-            description="Exception in generator argument",
-            test_input=lambda: _test_gen_func_fails,
-            # Because generator throws early on, the pager did not have a
-            # chance yet to write the file.
-            expected_pager="",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=RuntimeError,
-        ),
-        EchoViaPagerTest(
-            description="Keyboard interrupt should not terminate the pager",
-            test_input=lambda: _test_simulate_keyboard_interrupt(),
-            # Due to the keyboard interrupt during pager execution, click program
-            # should abort, but the pager should stay open.
-            # This allows users to cancel the program and search in the pager
-            # output, before they decide to terminate the pager.
-            expected_pager="output_before_keyboard_interrupt",
-            expected_stdout="",
-            expected_stderr="",
-            expected_error=KeyboardInterrupt,
-        ),
-        EchoViaPagerTest(
-            description="Writing to stdout during generator execution",
-            test_input=lambda: _test_gen_func_echo(),
-            expected_pager="testtest\n",
-            expected_stdout="hello\n",
-            expected_stderr="",
-            expected_error=None,
-        ),
-        EchoViaPagerTest(
-            description="Writing to stderr during generator execution",
-            test_input=lambda: _test_gen_func_echo(file=sys.stderr),
-            expected_pager="testtest\n",
-            expected_stdout="",
-            expected_stderr="hello\n",
-            expected_error=None,
-        ),
-    ],
-)
-def test_echo_via_pager(monkeypatch, capfd, pager_cmd, test):
-    monkeypatch.setitem(os.environ, "PAGER", pager_cmd)
-    monkeypatch.setattr(click._termui_impl, "isatty", lambda x: True)
-
-    test_input = test.test_input()
-    expected_pager = test.expected_pager
-    expected_stdout = test.expected_stdout
-    expected_stderr = test.expected_stderr
-    expected_error = test.expected_error
-
-    check_raise = pytest.raises(expected_error) if expected_error else nullcontext()
-
-    pager_out_tmp = Path(tempdir) / "pager_out.txt"
-    pager_out_tmp.unlink(missing_ok=True)
-    with pager_out_tmp.open("w") as f:
-        force_subprocess_stdout = patch.object(
-            subprocess,
-            "Popen",
-            partial(subprocess.Popen, stdout=f),
-        )
-        with force_subprocess_stdout:
-            with check_raise:
-                click.echo_via_pager(test_input)
-
-    out, err = capfd.readouterr()
-
-    pager = pager_out_tmp.read_text()
-
-    assert pager == expected_pager, (
-        f"Unexpected pager output in test case '{test.description}'"
-    )
-    assert out == expected_stdout, (
-        f"Unexpected stdout in test case '{test.description}'"
-    )
-    assert err == expected_stderr, (
-        f"Unexpected stderr in test case '{test.description}'"
-    )
-
-
-def test_echo_color_flag(monkeypatch, capfd):
-    isatty = True
-    monkeypatch.setattr(click._compat, "isatty", lambda x: isatty)
-
-    text = "foo"
-    styled_text = click.style(text, fg="red")
-    assert styled_text == "\x1b[31mfoo\x1b[0m"
-
-    click.echo(styled_text, color=False)
-    out, err = capfd.readouterr()
-    assert out == f"{text}\n"
-
-    click.echo(styled_text, color=True)
-    out, err = capfd.readouterr()
-    assert out == f"{styled_text}\n"
-
-    isatty = True
-    click.echo(styled_text)
-    out, err = capfd.readouterr()
-    assert out == f"{styled_text}\n"
-
-    isatty = False
-    # Faking isatty() is not enough on Windows;
-    # the implementation caches the colorama wrapped stream
-    # so we have to use a new stream for each test
-    stream = StringIO()
-    click.echo(styled_text, file=stream)
-    assert stream.getvalue() == f"{text}\n"
-
-    stream = StringIO()
-    click.echo(styled_text, file=stream, color=True)
-    assert stream.getvalue() == f"{styled_text}\n"
-
-
-def test_prompt_cast_default(capfd, monkeypatch):
-    monkeypatch.setattr(sys, "stdin", StringIO("\n"))
-    value = click.prompt("value", default="100", type=int)
-    capfd.readouterr()
-    assert isinstance(value, int)
-
-
-@pytest.mark.skipif(WIN, reason="Test too complex to make work windows.")
-def test_echo_writing_to_standard_error(capfd, monkeypatch):
-    def emulate_input(text):
-        """Emulate keyboard input."""
-        monkeypatch.setattr(sys, "stdin", StringIO(text))
-
-    click.echo("Echo to standard output")
-    out, err = capfd.readouterr()
-    assert out == "Echo to standard output\n"
-    assert err == ""
-
-    click.echo("Echo to standard error", err=True)
-    out, err = capfd.readouterr()
-    assert out == ""
-    assert err == "Echo to standard error\n"
-
-    emulate_input("asdlkj\n")
-    click.prompt("Prompt to stdin")
-    out, err = capfd.readouterr()
-    assert out == "Prompt to stdin: "
-    assert err == ""
-
-    emulate_input("asdlkj\n")
-    click.prompt("Prompt to stdin with no suffix", prompt_suffix="")
-    out, err = capfd.readouterr()
-    assert out == "Prompt to stdin with no suffix"
-    assert err == ""
-
-    emulate_input("asdlkj\n")
-    click.prompt("Prompt to stderr", err=True)
-    out, err = capfd.readouterr()
-    assert out == " "
-    assert err == "Prompt to stderr:"
-
-    emulate_input("asdlkj\n")
-    click.prompt("Prompt to stderr with no suffix", prompt_suffix="", err=True)
-    out, err = capfd.readouterr()
-    assert out == "x"
-    assert err == "Prompt to stderr with no suffi"
-
-    emulate_input("y\n")
-    click.confirm("Prompt to stdin")
-    out, err = capfd.readouterr()
-    assert out == "Prompt to stdin [y/N]: "
-    assert err == ""
-
-    emulate_input("y\n")
-    click.confirm("Prompt to stdin with no suffix", prompt_suffix="")
-    out, err = capfd.readouterr()
-    assert out == "Prompt to stdin with no suffix [y/N]"
-    assert err == ""
-
-    emulate_input("y\n")
-    click.confirm("Prompt to stderr", err=True)
-    out, err = capfd.readouterr()
-    assert out == " "
-    assert err == "Prompt to stderr [y/N]:"
-
-    emulate_input("y\n")
-    click.confirm("Prompt to stderr with no suffix", prompt_suffix="", err=True)
-    out, err = capfd.readouterr()
-    assert out == "]"
-    assert err == "Prompt to stderr with no suffix [y/N"
-
-    monkeypatch.setattr(click.termui, "isatty", lambda x: True)
-    monkeypatch.setattr(click.termui, "getchar", lambda: " ")
-
-    click.pause("Pause to stdout")
-    out, err = capfd.readouterr()
-    assert out == "Pause to stdout\n"
-    assert err == ""
-
-    click.pause("Pause to stderr", err=True)
-    out, err = capfd.readouterr()
-    assert out == ""
-    assert err == "Pause to stderr\n"
-
-
-def test_echo_with_capsys(capsys):
-    click.echo("Capture me.")
-    out, err = capsys.readouterr()
-    assert out == "Capture me.\n"
-
-
-def test_open_file(runner):
     @click.command()
-    @click.argument("filename")
-    def cli(filename):
-        with click.open_file(filename) as f:
-            click.echo(f.read())
+    @click.argument("n", type=int)
+    def cli(n):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            val = pool.submit(lambda x: x + 1, n).result()
+        click.echo(str(val))
 
-        click.echo("meep")
-
-    with runner.isolated_filesystem():
-        with open("hello.txt", "w") as f:
-            f.write("Cool stuff")
-
-        result = runner.invoke(cli, ["hello.txt"])
-        assert result.exception is None
-        assert result.output == "Cool stuff\nmeep\n"
-
-        result = runner.invoke(cli, ["-"], input="foobar")
-        assert result.exception is None
-        assert result.output == "foobar\nmeep\n"
+    runner = CliRunner()
+    for i in range(10):
+        result = runner.invoke(cli, [str(i)])
+        assert result.exit_code == 0
+        assert result.output.strip() == str(i + 1)
 
 
-def test_open_file_pathlib_dash(runner):
+# ---------------------------------------------------------------------------
+# Category 5: Sequential invocations and state isolation
+# ---------------------------------------------------------------------------
+
+
+def test_output_isolation_across_invokes():
+    """Each ``invoke()`` must capture only its own output."""
+
     @click.command()
-    @click.argument(
-        "filename", type=click.Path(allow_dash=True, path_type=pathlib.Path)
-    )
-    def cli(filename):
-        click.echo(str(type(filename)))
+    @click.argument("msg")
+    def cli(msg):
+        click.echo(msg)
 
-        with click.open_file(filename) as f:
-            click.echo(f.read())
-
-        result = runner.invoke(cli, ["-"], input="value")
-        assert result.exception is None
-        assert result.output == "pathlib.Path\nvalue\n"
+    runner = CliRunner()
+    for word in ("alpha", "beta", "gamma"):
+        result = runner.invoke(cli, [word])
+        assert result.exit_code == 0
+        assert result.output.strip() == word
 
 
-def test_open_file_ignore_errors_stdin(runner):
+def test_stderr_isolation_across_invokes():
+    """Each ``invoke()`` must capture only its own stderr."""
+
     @click.command()
-    @click.argument("filename")
-    def cli(filename):
-        with click.open_file(filename, errors="ignore") as f:
-            click.echo(f.read())
+    @click.argument("msg")
+    def cli(msg):
+        click.echo(msg, err=True)
 
-    result = runner.invoke(cli, ["-"], input=os.urandom(16))
-    assert result.exception is None
+    runner = CliRunner()
+    for word in ("err1", "err2", "err3"):
+        result = runner.invoke(cli, [word])
+        assert result.exit_code == 0
+        assert result.stderr.strip() == word
+        assert result.stdout.strip() == ""
 
 
-def test_open_file_respects_ignore(runner):
-    with runner.isolated_filesystem():
-        with open("test.txt", "w") as f:
-            f.write("Hello world!")
-
-        with click.open_file("test.txt", encoding="utf8", errors="ignore") as f:
-            assert f.errors == "ignore"
+def test_mixed_output_order_preserved():
+    """stdout/stderr interleaving is captured in order."""
 
+    @click.command()
+    def cli():
+        click.echo("out1")
+        click.echo("err1", err=True)
+        click.echo("out2")
+        click.echo("err2", err=True)
 
-def test_open_file_ignore_invalid_utf8(runner):
-    with runner.isolated_filesystem():
-        with open("test.txt", "wb") as f:
-            f.write(b"\xe2\x28\xa1")
-
-        with click.open_file("test.txt", encoding="utf8", errors="ignore") as f:
-            f.read()
-
-
-def test_open_file_ignore_no_encoding(runner):
-    with runner.isolated_filesystem():
-        with open("test.bin", "wb") as f:
-            f.write(os.urandom(16))
-
-        with click.open_file("test.bin", errors="ignore") as f:
-            f.read()
-
-
-@pytest.mark.skipif(WIN, reason="os.chmod() is not fully supported on Windows.")
-@pytest.mark.parametrize("permissions", [0o400, 0o444, 0o600, 0o644])
-def test_open_file_atomic_permissions_existing_file(runner, permissions):
-    with runner.isolated_filesystem():
-        with open("existing.txt", "w") as f:
-            f.write("content")
-        os.chmod("existing.txt", permissions)
-
-        @click.command()
-        @click.argument("filename")
-        def cli(filename):
-            click.open_file(filename, "w", atomic=True).close()
-
-        result = runner.invoke(cli, ["existing.txt"])
-        assert result.exception is None
-        assert stat.S_IMODE(os.stat("existing.txt").st_mode) == permissions
-
-
-@pytest.mark.skipif(WIN, reason="os.stat() is not fully supported on Windows.")
-def test_open_file_atomic_permissions_new_file(runner):
-    with runner.isolated_filesystem():
-
-        @click.command()
-        @click.argument("filename")
-        def cli(filename):
-            click.open_file(filename, "w", atomic=True).close()
-
-        # Create a test file to get the expected permissions for new files
-        # according to the current umask.
-        with open("test.txt", "w"):
-            pass
-        permissions = stat.S_IMODE(os.stat("test.txt").st_mode)
-
-        result = runner.invoke(cli, ["new.txt"])
-        assert result.exception is None
-        assert stat.S_IMODE(os.stat("new.txt").st_mode) == permissions
-
-
-def test_iter_keepopenfile(tmpdir):
-    expected = list(map(str, range(10)))
-    p = tmpdir.mkdir("testdir").join("testfile")
-    p.write("\n".join(expected))
-    with p.open() as f:
-        for e_line, a_line in zip(expected, click.utils.KeepOpenFile(f), strict=False):
-            assert e_line == a_line.strip()
-
-
-def test_iter_lazyfile(tmpdir):
-    expected = list(map(str, range(10)))
-    p = tmpdir.mkdir("testdir").join("testfile")
-    p.write("\n".join(expected))
-    with p.open() as f:
-        with click.utils.LazyFile(f.name) as lf:
-            for e_line, a_line in zip(expected, lf, strict=False):
-                assert e_line == a_line.strip()
-
-
-class MockMain:
-    __slots__ = "__package__"
-
-    def __init__(self, package_name):
-        self.__package__ = package_name
-
-
-@pytest.mark.parametrize(
-    ("path", "main", "expected"),
-    [
-        ("example.py", None, "example.py"),
-        (str(pathlib.Path("/foo/bar/example.py")), None, "example.py"),
-        ("example", None, "example"),
-        (str(pathlib.Path("example/__main__.py")), "example", "python -m example"),
-        (str(pathlib.Path("example/cli.py")), "example", "python -m example.cli"),
-        (str(pathlib.Path("./example")), "", "example"),
-    ],
-)
-def test_detect_program_name(path, main, expected):
-    assert click.utils._detect_program_name(path, _main=MockMain(main)) == expected
-
-
-def test_expand_args(monkeypatch):
-    user = os.path.expanduser("~")
-    assert user in click.utils._expand_args(["~"])
-    monkeypatch.setenv("CLICK_TEST", "hello")
-    assert "hello" in click.utils._expand_args(["$CLICK_TEST"])
-    assert "pyproject.toml" in click.utils._expand_args(["*.toml"])
-    assert os.path.join("tests", "conftest.py") in click.utils._expand_args(
-        ["**/conftest.py"]
-    )
-    assert "*.not-found" in click.utils._expand_args(["*.not-found"])
-    # a bad glob pattern, such as a pytest identifier, should return itself
-    assert click.utils._expand_args(["test.py::test_bad"])[0] == "test.py::test_bad"
-
-
-@pytest.mark.parametrize(
-    ("value", "max_length", "expect"),
-    [
-        pytest.param("", 10, "", id="empty"),
-        pytest.param("123 567 90", 10, "123 567 90", id="equal length, no dot"),
-        pytest.param("123 567 9. aaaa bbb", 10, "123 567 9.", id="sentence < max"),
-        pytest.param("123 567\n\n 9. aaaa bbb", 10, "123 567", id="paragraph < max"),
-        pytest.param("123 567 90123.", 10, "123 567...", id="truncate"),
-        pytest.param("123 5678 xxxxxx", 10, "123...", id="length includes suffix"),
-        pytest.param(
-            "token in ~/.netrc ciao ciao",
-            20,
-            "token in ~/.netrc...",
-            id="ignore dot in word",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "alter",
-    [
-        pytest.param(None, id=""),
-        pytest.param(
-            lambda text: "\n\b\n" + "  ".join(text.split(" ")) + "\n", id="no-wrap mark"
-        ),
-    ],
-)
-def test_make_default_short_help(value, max_length, alter, expect):
-    assert len(expect) <= max_length
+    runner = CliRunner()
+    result = runner.invoke(cli)
+    assert result.output == "out1\nerr1\nout2\nerr2\n"
+    assert result.stdout == "out1\nout2\n"
+    assert result.stderr == "err1\nerr2\n"
 
-    if alter:
-        value = alter(value)
 
-    out = click.utils.make_default_short_help(value, max_length)
-    assert out == expect
+def test_exception_does_not_corrupt_next_invoke():
+    """A failed invoke must not break subsequent invocations."""
+    call_count = 0
 
-```
----
+    @click.command()
+    def cli():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("intentional")
+        click.echo(f"call-{call_count}")
 
-## tests/typing/typing_aliased_group.py
+    runner = CliRunner()
 
-```python
-"""Example from https://click.palletsprojects.com/en/stable/advanced/#command-aliases"""
-
-from __future__ import annotations
-
-from typing_extensions import assert_type
-
-import click
-
-
-class AliasedGroup(click.Group):
-    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
-        rv = click.Group.get_command(self, ctx, cmd_name)
-        if rv is not None:
-            return rv
-        matches = [x for x in self.list_commands(ctx) if x.startswith(cmd_name)]
-        if not matches:
-            return None
-        elif len(matches) == 1:
-            return click.Group.get_command(self, ctx, matches[0])
-        ctx.fail(f"Too many matches: {', '.join(sorted(matches))}")
-
-    def resolve_command(
-        self, ctx: click.Context, args: list[str]
-    ) -> tuple[str | None, click.Command, list[str]]:
-        # always return the full command name
-        _, cmd, args = super().resolve_command(ctx, args)
-        assert cmd is not None
-        return cmd.name, cmd, args
-
-
-@click.command(cls=AliasedGroup)
-def cli() -> None:
-    pass
-
-
-assert_type(cli, AliasedGroup)
-
-
-@cli.command()
-def push() -> None:
-    pass
-
-
-@cli.command()
-def pop() -> None:
-    pass
-
-```
----
-
-## tests/typing/typing_confirmation_option.py
-
-```python
-"""From https://click.palletsprojects.com/en/stable/options/#yes-parameters"""
-
-from typing_extensions import assert_type
-
-import click
-
-
-@click.command()
-@click.confirmation_option(prompt="Are you sure you want to drop the db?")
-def dropdb() -> None:
-    click.echo("Dropped all tables!")
-
-
-assert_type(dropdb, click.Command)
-
-```
----
-
-## tests/typing/typing_group_kw_options.py
-
-```python
-from typing_extensions import assert_type
-
-import click
-
-
-@click.group(context_settings={})
-def hello() -> None:
-    pass
-
-
-assert_type(hello, click.Group)
-
-```
----
-
-## tests/typing/typing_help_option.py
-
-```python
-from typing_extensions import assert_type
-
-import click
-
-
-@click.command()
-@click.help_option("-h", "--help")
-def hello() -> None:
-    """Simple program that greets NAME for a total of COUNT times."""
-    click.echo("Hello!")
-
-
-assert_type(hello, click.Command)
-
-```
----
-
-## tests/typing/typing_options.py
-
-```python
-"""From https://click.palletsprojects.com/en/stable/quickstart/#adding-parameters"""
-
-from typing_extensions import assert_type
-
-import click
-
-
-@click.command()
-@click.option("--count", default=1, help="number of greetings")
-@click.argument("name")
-def hello(count: int, name: str) -> None:
-    for _ in range(count):
-        click.echo(f"Hello {name}!")
-
-
-assert_type(hello, click.Command)
-
-```
----
-
-## tests/typing/typing_password_option.py
-
-```python
-import codecs
-
-from typing_extensions import assert_type
-
-import click
-
-
-@click.command()
-@click.password_option()
-def encrypt(password: str) -> None:
-    click.echo(f"encoded: to {codecs.encode(password, 'rot13')}")
-
-
-assert_type(encrypt, click.Command)
-
-```
----
-
-## tests/typing/typing_progressbar.py
-
-```python
-from __future__ import annotations
-
-from typing_extensions import assert_type
-
-from click import progressbar
-from click._termui_impl import ProgressBar
-
-
-def test_length_is_int() -> None:
-    with progressbar(length=5) as bar:
-        assert_type(bar, ProgressBar[int])
-        for i in bar:
-            assert_type(i, int)
-
-
-def it() -> tuple[str, ...]:
-    return ("hello", "world")
-
-
-def test_generic_on_iterable() -> None:
-    with progressbar(it()) as bar:
-        assert_type(bar, ProgressBar[str])
-        for s in bar:
-            assert_type(s, str)
-
-```
----
-
-## tests/typing/typing_simple_example.py
-
-```python
-"""The simple example from https://github.com/pallets/click#a-simple-example."""
-
-from typing_extensions import assert_type
-
-import click
-
-
-@click.command()
-@click.option("--count", default=1, help="Number of greetings.")
-@click.option("--name", prompt="Your name", help="The person to greet.")
-def hello(count: int, name: str) -> None:
-    """Simple program that greets NAME for a total of COUNT times."""
-    for _ in range(count):
-        click.echo(f"Hello, {name}!")
-
-
-assert_type(hello, click.Command)
-
-```
----
-
-## tests/typing/typing_version_option.py
-
-```python
-"""
-From https://click.palletsprojects.com/en/stable/options/#callbacks-and-eager-options.
-"""
-
-from typing_extensions import assert_type
-
-import click
-
-
-@click.command()
-@click.version_option("0.1")
-def hello() -> None:
-    click.echo("Hello World!")
-
-
-assert_type(hello, click.Command)
+    r1 = runner.invoke(cli)
+    assert r1.exit_code == 0
+    assert "call-1" in r1.output
+
+    r2 = runner.invoke(cli)
+    assert r2.exit_code == 1
+    assert isinstance(r2.exception, RuntimeError)
+
+    r3 = runner.invoke(cli)
+    assert r3.exit_code == 0
+    assert "call-3" in r3.output
+
+
+def test_sys_streams_restored_after_invoke():
+    """``sys.stdout``/``stderr``/``stdin`` are restored after ``invoke()``."""
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    original_stdin = sys.stdin
+
+    @click.command()
+    def cli():
+        click.echo("inside")
+
+    runner = CliRunner()
+    runner.invoke(cli)
+
+    assert sys.stdout is original_stdout
+    assert sys.stderr is original_stderr
+    assert sys.stdin is original_stdin
+
+
+def test_sys_streams_restored_after_exception():
+    """sys streams are restored even when the command raises."""
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    @click.command()
+    def cli():
+        raise RuntimeError("boom")
+
+    runner = CliRunner()
+    runner.invoke(cli)
+
+    assert sys.stdout is original_stdout
+    assert sys.stderr is original_stderr
+
+
+# ---------------------------------------------------------------------------
+# Category 6: Stress tests - high-iteration reproducers for race conditions
+#
+# These are marked with ``pytest.mark.stress`` so they can be included or
+# excluded independently. The CI workflow runs them in a separate job.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.stress
+@pytest.mark.parametrize("_", range(10_000))
+def test_stress_thread_pool_with_exit(_):
+    """Exact #2993 reproducer: ``ThreadPoolExecutor`` + ``SystemExit``."""
+
+    @click.command()
+    @click.argument("args", nargs=-1)
+    def cli(**_kw):
+        with ThreadPoolExecutor() as executor:
+            executor.submit(lambda: None).result()
+        raise SystemExit(1)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["test"])
+    assert result.exit_code == 1
+
+
+@pytest.mark.stress
+@pytest.mark.parametrize("_", range(10_000))
+def test_stress_logging_sequential_invocations(_):
+    """#3110/#824 reproducer: sequential invocations with logging."""
+    logger = logging.getLogger("stress_sequential")
+
+    @click.command()
+    def cli():
+        logger.warning("msg")
+        click.echo("ok")
+
+    runner = CliRunner()
+    result = runner.invoke(cli)
+    assert result.exit_code == 0
+
+
+@pytest.mark.stress
+@pytest.mark.parametrize("_", range(10_000))
+def test_stress_gc_between_invocations(_):
+    """Force GC after each invocation to provoke finalizer races."""
+
+    @click.command()
+    def cli():
+        click.echo("output")
+        click.echo("error", err=True)
+
+    runner = CliRunner()
+    result = runner.invoke(cli)
+    assert result.exit_code == 0
+    assert "output" in result.output
+    gc.collect()
 
 ```
